@@ -29,14 +29,14 @@ ROOM_SIZE = {"X": 400,
 
 MAX_FORCE_WHEELS = 100
 
-IMAGE_WIDTH = 100
-IMAGE_HEIGHT = 100
+IMAGE_WIDTH = 84
+IMAGE_HEIGHT = 84
 
 WALL_MASS = 1000
 
-MAX_NUM_COLLISIONS = 10000
+MAX_NUM_COLLISIONS = 1
 
-OBSERVATION_SPACE_SIZE = 4 + 3 + 1 + 1 + 1 + 1 + 1 + 1 + IMAGE_WIDTH * IMAGE_HEIGHT + IMAGE_WIDTH * IMAGE_HEIGHT * 4
+OBSERVATION_SPACE_SIZE = 4 + 3 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + IMAGE_WIDTH * IMAGE_HEIGHT + IMAGE_WIDTH * IMAGE_HEIGHT * 4
 
 tf1, tf, tfv = try_import_tf()
 torch, nn = try_import_torch()
@@ -103,6 +103,7 @@ class CorridorWithTurn(gym.Env):
         self.collision_count = 0
         self.robo_fell_over = 0
         self.prev_distance = 0
+        self.distance_to_goal = 0
 
         print(self.num_joints)
         for jointIndex in range(0, self.num_joints):
@@ -288,8 +289,8 @@ class CorridorWithTurn(gym.Env):
             target_position=target_position,
             near=0.1,
             far=20,
-            width=100,
-            height=100,
+            width=IMAGE_WIDTH,
+            height=IMAGE_HEIGHT,
         )
         self.robo_camera.set_camera_pose(camera_position, target_position)
 
@@ -309,33 +310,37 @@ class CorridorWithTurn(gym.Env):
         self.positions = []
         self.action_space = Discrete(5)
         self.passed_time_steps = 0
-        low = np.zeros(OBSERVATION_SPACE_SIZE, np.float64)
-        low[0:4] = -1
-        low[4:6] = -6
-        low[7:9] = -MAX_FORCE_WHEELS
-        low[9] = 0
-        low[10] = 0
-        low[11] = 0
-        low[12] = 0
-        low[13: IMAGE_WIDTH * IMAGE_HEIGHT + 13] = 0
-        # print("low",low)
-        high = np.full(OBSERVATION_SPACE_SIZE, 255, np.float64)
-        # print("high", high)
-        high[0:4] = 1
-        high[4:7] = 6
-        high[7:9] = MAX_FORCE_WHEELS
-        high[9] = MAX_NUM_COLLISIONS
-        high[10] = 1
-        high[11] = self.initial_distance * 2
-        high[12] = MAX_TIMESTEPS_EPISODE
-        high[13: IMAGE_WIDTH * IMAGE_HEIGHT + 13] = 1
-        # print(high[0:15])
-        self.observation_space = gym.spaces.Box(low=low,
-                                                high=high,
-                                                dtype=np.float64)
+
+        spaces = {}
+        spaces["orientation"] = gym.spaces.Box(low=np.full(4, -1), high=np.full(4, 1), dtype=np.float64)
+        spaces["position"] = gym.spaces.Box(low=np.full(3, -6), high=np.full(3, 6), dtype=np.float64)
+        spaces["wheels_force"] = gym.spaces.Box(low=np.full(2, -MAX_FORCE_WHEELS), high=np.full(2, MAX_FORCE_WHEELS), dtype=np.float64)
+        spaces["collisions"] = gym.spaces.Box(low=np.array(0), high=np.array(MAX_NUM_COLLISIONS), dtype=np.int32)
+        spaces["robo_fell_over"] = gym.spaces.Box(low=np.array(0), high=np.array(1), dtype=np.int32)
+        spaces["distance_to_goal"] = gym.spaces.Box(low=np.array(-self.initial_distance * 1.5), high=np.array(self.initial_distance * 1.5), dtype=np.float64)
+        spaces["passed_time_steps"] = gym.spaces.Box(low=np.array(0), high=np.array(MAX_TIMESTEPS_EPISODE), dtype=np.int32)
+        spaces["rgba"] = gym.spaces.Box(low=np.full((IMAGE_HEIGHT, IMAGE_WIDTH, 4), 0), high=np.full((IMAGE_HEIGHT, IMAGE_WIDTH, 4), 255), dtype=np.float64)
+        spaces["depth"] = gym.spaces.Box(low=np.full((IMAGE_HEIGHT, IMAGE_WIDTH), 0), high=np.full((IMAGE_HEIGHT, IMAGE_WIDTH), 1), dtype=np.float64)
+
+        self.observation_space = gym.spaces.Dict(spaces)
+
         self.initial_state = p.saveState()
         # Set the seed. This is only used for the final (reach goal) reward.
         self.reset(seed=env_config.worker_index * env_config.num_workers)
+
+    def get_observation_vector(self):
+        obs = {}
+        obs["orientation"] = np.array(self.robo_orn)
+        obs["position"] = np.array(self.robo_pos)
+        obs["wheels_force"] = np.array([self.force_left_wheels, self.force_right_wheels], dtype=np.float64)
+        obs["collisions"] = np.array(self.collision_count, dtype=np.int32)
+        obs["robo_fell_over"] = np.array(self.robo_fell_over, dtype=np.int32)
+        obs["distance_to_goal"] = np.array(self.distance_to_goal, dtype=np.float64)
+        obs["passed_time_steps"] = np.array(self.passed_time_steps, dtype=np.int32)
+        obs["rgba"] = np.array(self.rgba, dtype=np.float64)
+        obs["depth"] = np.array(self.depth, dtype=np.float64)
+        #print(obs)
+        return obs
 
     def reset(self, *, seed=None, options=None):
         random.seed(seed)
@@ -345,32 +350,13 @@ class CorridorWithTurn(gym.Env):
         self.collision_count = 0
         self.passed_time_steps = 0
         self.robo_fell_over = 0
-        self.prev_distance = self.initial_distance
+        self.distance_to_goal = self.prev_distance = self.initial_distance
         self.robo_pos, self.robo_orn = p.getBasePositionAndOrientation(self.robo_id)
-        self.rgba, depth, seg = self.robo_camera.get_frame()
-        self.depth = depth
+        self.rgba, self.depth, seg = self.robo_camera.get_frame()
 
-        obs = self.fill_observation_vector()
-
-        # print(obs[0:15])
+        obs = self.get_observation_vector()
 
         return obs, {}
-
-    def fill_observation_vector(self):
-        flat_rgba = np.array(self.rgba).flatten()
-        flat_depth = np.array(self.depth).flatten()
-        obs = np.zeros(OBSERVATION_SPACE_SIZE)
-        obs[0:4] = self.robo_orn
-        obs[4:7] = self.robo_pos
-        obs[7] = self.force_left_wheels
-        obs[8] = self.force_right_wheels
-        obs[9] = self.collision_count
-        obs[10] = self.robo_fell_over
-        obs[11] = self.initial_distance
-        obs[12] = self.passed_time_steps
-        obs[13: IMAGE_WIDTH * IMAGE_HEIGHT + 13] = flat_depth
-        obs[IMAGE_WIDTH * IMAGE_HEIGHT + 13:] = flat_rgba
-        return obs
 
     def step(self, action):
         reward = 0
@@ -400,10 +386,12 @@ class CorridorWithTurn(gym.Env):
                                                       self.force_left_wheels, self.force_left_wheels],
                                     forces=[MAX_FORCE_WHEELS, MAX_FORCE_WHEELS, MAX_FORCE_WHEELS,
                                             MAX_FORCE_WHEELS])
-        #print(1, "step")
+
+        self.prev_distance = np.array(self.distance_to_goal)
+        # print(1, "step")
         for i in range(4):
             p.stepSimulation()
-            #print(10, "steps")
+            # print(10, "steps")
 
         head_link_state = p.getLinkState(self.robo_id, 13, computeForwardKinematics=True)
         head_link_position = np.array(head_link_state[0])
@@ -418,19 +406,18 @@ class CorridorWithTurn(gym.Env):
         # save the frame
         # self.robo_camera.save_frame("frame.png", rgba=self.rgba)
 
-        distance_to_goal = np.linalg.norm(self.goal_pos - self.robo_pos)
+        self.distance_to_goal = np.linalg.norm(self.goal_pos - self.robo_pos)
 
         # Reward the agent for getting closer to the goal
-        if self.prev_distance > distance_to_goal:
-            reward = 0.05
+        if self.prev_distance > self.distance_to_goal:
+            reward = 0.1
 
-        self.prev_distance = distance_to_goal
         # Calculate a factor that can be used to calculate a reward depending on how close the agent is to the goal
-        reward_factor = distance_to_goal / self.initial_distance
+        reward_factor = self.distance_to_goal / self.initial_distance
 
         # Reset the simulation when the agent hasn't reached the goal in a certain time frame
         if self.passed_time_steps >= MAX_TIMESTEPS_EPISODE:
-            print("Didn't reach goal. Distance left:", distance_to_goal)
+            print("Didn't reach goal. Distance left:", self.distance_to_goal)
             reward = -30
             truncated = True
 
@@ -447,14 +434,6 @@ class CorridorWithTurn(gym.Env):
             self.collision_count += 1
             reward = -30
             truncated = True
-            # Reset the Simulation if the agent made the robot collide too many times
-            # if self.collision_count >= MAX_NUM_COLLISIONS:
-            '''
-            reward = -10
-            reward += 10 - (reward_factor * 10)
-            print("Too many collisions! Resetting.. Distance left:", distance_to_goal)
-            truncated = True
-            '''
 
         # Check if the agent reached the goal
         if self.collision_detector_goal.in_collision():
@@ -468,10 +447,9 @@ class CorridorWithTurn(gym.Env):
             # save the frame
             self.above_camera.save_frame("frame.png", rgba=rgba)
 
-
         self.passed_time_steps += 1
 
-        obs = self.fill_observation_vector()
+        obs = self.get_observation_vector()
         # print(obs[0:15])
 
         return (
@@ -508,19 +486,7 @@ def plt_image(img):
 from ray.tune.logger import pretty_print
 from ray.rllib.algorithms.dqn import DQNConfig
 
-'''
-config = (DQNConfig().environment(CorridorWithTurn)
-          .rollouts(num_rollout_workers=2, create_env_on_local_worker=True))
 
-pretty_print(config.to_dict())
-
-algo = config.build()
-
-for i in range(10):
-    result = algo.train()
-
-print(pretty_print(result))
-'''
 if __name__ == '__main__':
 
     args = parser.parse_args()
@@ -552,7 +518,7 @@ if __name__ == '__main__':
         # Parameters for the Exploration class' constructor:
         "initial_epsilon": 1.0,
         "final_epsilon": 0.02,
-        "epsilon_timesteps": 100000,  # Timesteps over which to anneal epsilon.
+        "epsilon_timesteps": 50000,  # Timesteps over which to anneal epsilon.
     }
 
     config = (
@@ -562,12 +528,13 @@ if __name__ == '__main__':
         .rollouts(num_rollout_workers=0, create_env_on_local_worker=True)
         # Use GPUs iff `RLLIB_NUM_GPUS` env var set to > 0.
         .resources(num_gpus=int(os.environ.get("RLLIB_NUM_GPUS", "0")))
-        .training(double_q=False, lr_schedule=[[0, 5e-6], [100000, 5e-6]], v_min=-30, v_max=100, noisy=False,
+        .training(double_q=False, lr_schedule=[[0, 1e-3], [50000, 1e-6]], v_min=-30, v_max=100, noisy=False,
                   replay_buffer_config=replay_config)
         .exploration(explore=True, exploration_config=exploration_config)
         # lr=7e-5,
         #
     )
+    config.gamma = 0.999
 
     stop = {
         "training_iteration": args.stop_iters,
