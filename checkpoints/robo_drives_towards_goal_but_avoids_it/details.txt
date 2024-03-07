@@ -1,0 +1,7 @@
+Timesteps 50000
+stop reward mean 100
+reward per black pixel 0.001
+reward per step towards goal 0.01
+reward for colliding with wall -10
+reward for colliding with obstacle -10
+reward for taking too many timesteps -10

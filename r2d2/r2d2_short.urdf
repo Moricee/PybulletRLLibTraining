@@ -248,7 +248,7 @@
       </geometry>
       <origin rpy="0 1.57075 0 " xyz="0.1 0 -0.2"/>
       <material name="Gray">
-        <color rgba=".7 .7 .7 1"/>
+        <color rgba=".5 .5 .5 1"/>
       </material>
     </visual>
     <collision>

@@ -17,8 +17,8 @@ from ray.rllib.utils.framework import try_import_tf, try_import_torch
 from ray.rllib.utils.test_utils import check_learning_achieved
 import matplotlib.pyplot as plt
 
-MAX_TIMESTEPS = 500000
-MAX_TIMESTEPS_EPISODE = 1000
+MAX_TIMESTEPS = 150000
+MAX_TIMESTEPS_EPISODE = 500
 MAX_ITERS = 500
 MAX_DISTANCE = 8
 
@@ -65,7 +65,7 @@ parser.add_argument(
     "--stop-timesteps", type=int, default=MAX_TIMESTEPS, help="Number of timesteps to train."
 )
 parser.add_argument(
-    "--stop-reward", type=float, default=30, help="Reward at which we stop training."
+    "--stop-reward", type=float, default=70, help="Reward at which we stop training."
 )
 parser.add_argument(
     "--with-tune",
@@ -90,10 +90,26 @@ class CorridorWithTurn(gym.Env):
 
     def __init__(self, env_config: EnvContext):
         self.end_pos = env_config["corridor_length"]
-        self.client_id = p.connect(p.DIRECT)
+        self.client_id = p.connect(p.GUI)
         p.setAdditionalSearchPath(pybullet_data.getDataPath())  # optionally
         p.setGravity(0, 0, -10)
-        plane_id = p.loadURDF("plane.urdf")
+        '''
+        plane_id_coll = p.createCollisionShape(p.GEOM_BOX, halfExtents=[10, 10, 0.2])
+        plane_id = p.createVisualShape(p.GEOM_BOX, halfExtents=[0.2, 10, 10], rgbaColor=[1, 1, 1, 1])
+
+        plane_object_id = p.createMultiBody(baseMass=0,
+                                            baseInertialFramePosition=[0, 0, 0],
+                                            baseCollisionShapeIndex=plane_id_coll,
+                                            baseVisualShapeIndex=plane_id,
+                                            basePosition=[0, 0, -0.2],
+                                            baseOrientation=[0, 0, 0, 1],
+                                            useMaximalCoordinates=True)
+        '''
+
+
+        plane_id = p.loadURDF("plane/plane.urdf", globalScaling=2, basePosition=[2,0,0])
+        #plane_texture_id = p.loadTexture('textures/IllustrationForCube.bmp')
+        #p.changeVisualShape(plane_id, -1, textureUniqueId=plane_texture_id)
         start_pos = [0, -5.3, 0.3]
         # p.getQuaternionFromAxisAngle(angle=np.pi/2, axis=[0,0,1])
         start_orientation_walls_vert = [np.sin(np.pi / 2), 1, 0, 0]
@@ -110,8 +126,7 @@ class CorridorWithTurn(gym.Env):
         self.force_left_wheels = 0  # Force applied to left wheels
         self.force_right_wheels = 0  # Force applied to right wheels
         self.passed_time_steps = 0
-
-
+        self.reset_count = 0
         print(self.num_joints)
         for jointIndex in range(0, self.num_joints):
             print(p.getJointInfo(self.robo_id, jointIndex))
@@ -119,11 +134,11 @@ class CorridorWithTurn(gym.Env):
 
         # Creating the outer and inner walls of the testing grounds
 
-        inner_wall_id_coll = p.createCollisionShape(p.GEOM_BOX, halfExtents=[5, 0.2, 1])
-        inner_wall_id = p.createVisualShape(p.GEOM_BOX, halfExtents=[5.9, 0.2, 1])
+        inner_wall_id_coll = p.createCollisionShape(p.GEOM_BOX, halfExtents=[5.9, 0.2, 1])
+        inner_wall_id = p.createVisualShape(p.GEOM_BOX, halfExtents=[5.9, 0.2, 1], rgbaColor=[0, 0.5, 0.5, 1])
 
-        outer_wall_id_coll = p.createCollisionShape(p.GEOM_BOX, halfExtents=[6, 0.2, 1])
-        outer_wall_id = p.createVisualShape(p.GEOM_BOX, halfExtents=[6, 0.2, 1])
+        outer_wall_id_coll = p.createCollisionShape(p.GEOM_BOX, halfExtents=[5.9, 0.2, 1])
+        outer_wall_id = p.createVisualShape(p.GEOM_BOX, halfExtents=[5.9, 0.2, 1], rgbaColor=[0, 0.5, 0.5, 1])
 
         wall_ids = []
 
@@ -163,7 +178,7 @@ class CorridorWithTurn(gym.Env):
                                           baseInertialFramePosition=[0, 0, 0],
                                           baseCollisionShapeIndex=outer_wall_id_coll,
                                           baseVisualShapeIndex=outer_wall_id,
-                                          basePosition=[0, -6, 1],
+                                          basePosition=[0, -6.1, 1],
                                           baseOrientation=start_orientation_walls_hori,
                                           useMaximalCoordinates=True))
 
@@ -171,16 +186,16 @@ class CorridorWithTurn(gym.Env):
                                           baseInertialFramePosition=[0, 0, 0],
                                           baseCollisionShapeIndex=outer_wall_id_coll,
                                           baseVisualShapeIndex=outer_wall_id,
-                                          basePosition=[0, 6, 1],
+                                          basePosition=[0, 6.1, 1],
                                           baseOrientation=start_orientation_walls_hori,
                                           useMaximalCoordinates=True))
 
         # Creating the obstacles consisting of three cubes and three cylinders
         obstacle_cube_id_coll = p.createCollisionShape(p.GEOM_BOX, halfExtents=[0.5, 0.5, 0.5])
-        obstacle_cube_id = p.createVisualShape(p.GEOM_BOX, halfExtents=[0.5, 0.5, 0.5])
+        obstacle_cube_id = p.createVisualShape(p.GEOM_BOX, halfExtents=[0.5, 0.5, 0.5], rgbaColor=[0.5, 0, 0.2, 1])
 
         obstacle_cyl_id_coll = p.createCollisionShape(p.GEOM_CYLINDER, radius=0.25)
-        obstacle_cyl_id = p.createVisualShape(p.GEOM_CYLINDER, radius=0.25)
+        obstacle_cyl_id = p.createVisualShape(p.GEOM_CYLINDER, radius=0.25, rgbaColor=[0, 0.5, 0.5, 1])
 
         obstacle_ids = []
         '''
@@ -227,7 +242,6 @@ class CorridorWithTurn(gym.Env):
                                               useMaximalCoordinates=True))
                                               
         '''
-
         obstacle_ids.append(p.createMultiBody(baseMass=WALL_MASS,
                                               baseInertialFramePosition=[0, 0, 0],
                                               baseCollisionShapeIndex=obstacle_cyl_id_coll,
@@ -238,7 +252,7 @@ class CorridorWithTurn(gym.Env):
 
         # Creating a wall behind the ball so the robo can't drive too far behind it
         obstacle_wall_id_coll = p.createCollisionShape(p.GEOM_BOX, halfExtents=[1.8, 0.5, 1])
-        obstacle_wall_id = p.createVisualShape(p.GEOM_BOX, halfExtents=[1.8, 0.5, 1])
+        obstacle_wall_id = p.createVisualShape(p.GEOM_BOX, halfExtents=[1.8, 0.5, 1], rgbaColor=[0.5, 0, 0.5, 1])
 
         obstacle_ids.append(p.createMultiBody(baseMass=WALL_MASS,
                                               baseInertialFramePosition=[0, 0, 0],
@@ -257,18 +271,19 @@ class CorridorWithTurn(gym.Env):
 
         self.collision_detector_avoid = putils.collision.CollisionDetector(self.client_id, collision_pairs)
 
-        goal_ball_id_coll = p.createCollisionShape(p.GEOM_SPHERE, radius=0.6)
-        goal_ball_id = p.createVisualShape(p.GEOM_SPHERE, radius=0.6, rgbaColor=[0, 0, 1, 1])
+        goal_box_id_coll = p.createCollisionShape(p.GEOM_BOX, halfExtents=[0.3, 0.3, 0.3])
+        goal_box_id = p.createVisualShape(p.GEOM_BOX, halfExtents=[0.3, 0.3, 0.3], rgbaColor=[0, 0, 0, 1])
 
-        self.goal_ball_body_id = p.createMultiBody(baseMass=p.GEOM_SPHERE,
-                                              baseInertialFramePosition=[0, 0, 0],
-                                              baseCollisionShapeIndex=goal_ball_id_coll,
-                                              baseVisualShapeIndex=goal_ball_id,
-                                              basePosition=[random.random() - 0.5, -1, 0.6],
-                                              baseOrientation=start_orientation_walls_hori,
-                                              useMaximalCoordinates=True)
+        self.goal_ball_body_id = p.createMultiBody(baseMass=p.GEOM_BOX,
+                                                   baseInertialFramePosition=[0, 0, 0],
+                                                   baseCollisionShapeIndex=goal_box_id_coll,
+                                                   baseVisualShapeIndex=goal_box_id,
+                                                   basePosition=[0, -1, 0.6],
+                                                   baseOrientation=start_orientation_walls_hori,
+                                                   useMaximalCoordinates=True)
 
-        self.collision_detector_goal = putils.CollisionDetector(self.client_id, [(self.robo_id, self.goal_ball_body_id)])
+        self.collision_detector_goal = putils.CollisionDetector(self.client_id,
+                                                                [(self.robo_id, self.goal_ball_body_id)])
 
         self.goal_pos, goal_orientation = p.getBasePositionAndOrientation(self.goal_ball_body_id)
         self.goal_pos = np.array(self.goal_pos)
@@ -329,25 +344,24 @@ class CorridorWithTurn(gym.Env):
         # save the frame
         self.above_camera.save_frame("frame.png", rgba=rgba)
 
-
         self.action_space = Discrete(3)
 
-
         spaces = {}
-        spaces["orientation"] = gym.spaces.Box(low=np.full(4, -1), high=np.full(4, 1), dtype=np.float64)
+        spaces["orientation"] = gym.spaces.Box(low=np.full(4, -1.1), high=np.full(4, 1.1), dtype=np.float64)
         spaces["position"] = gym.spaces.Box(low=np.full(3, -6), high=np.full(3, 6), dtype=np.float64)
         spaces["wheels_force"] = gym.spaces.Box(low=np.full(2, -MAX_FORCE_WHEELS), high=np.full(2, MAX_FORCE_WHEELS),
                                                 dtype=np.float64)
-        spaces["collisions"] = gym.spaces.Box(low=np.array(0), high=np.array(MAX_NUM_COLLISIONS), dtype=np.int32)
-        spaces["robo_fell_over"] = gym.spaces.Box(low=np.array(0), high=np.array(1), dtype=np.int32)
+        spaces["collisions"] = gym.spaces.Box(low=np.array(0), high=np.array(MAX_NUM_COLLISIONS + 1), dtype=np.int32)
+        spaces["robo_fell_over"] = gym.spaces.Box(low=np.array(0), high=np.array(1 + 1), dtype=np.int32)
         spaces["distance_to_goal"] = gym.spaces.Box(low=np.array(0),
                                                     high=np.array(MAX_DISTANCE), dtype=np.float64)
-        spaces["passed_time_steps"] = gym.spaces.Box(low=np.array(0), high=np.array(MAX_TIMESTEPS_EPISODE),
+        spaces["passed_time_steps"] = gym.spaces.Box(low=np.array(0), high=np.array(MAX_TIMESTEPS_EPISODE + 1),
                                                      dtype=np.int32)
         spaces["rgba"] = gym.spaces.Box(low=np.full((IMAGE_HEIGHT, IMAGE_WIDTH, 4), 0),
-                                        high=np.full((IMAGE_HEIGHT, IMAGE_WIDTH, 4), 255), dtype=np.float64)
+                                        high=np.full((IMAGE_HEIGHT, IMAGE_WIDTH, 4), 255 + 1), dtype=np.float64)
+
         spaces["depth"] = gym.spaces.Box(low=np.full((IMAGE_HEIGHT, IMAGE_WIDTH), 0),
-                                         high=np.full((IMAGE_HEIGHT, IMAGE_WIDTH), 1), dtype=np.float64)
+                                         high=np.full((IMAGE_HEIGHT, IMAGE_WIDTH), 1.1), dtype=np.float64)
 
         self.observation_space = gym.spaces.Dict(spaces)
 
@@ -372,6 +386,12 @@ class CorridorWithTurn(gym.Env):
     def reset(self, *, seed=None, options=None):
         random.seed(seed)
         p.restoreState(self.initial_state)
+        lines = ['Readme', 'How to write text files in Python']
+        with open('positions.txt', 'a') as f:
+            f.write(str(self.positions))
+            f.write('\n')
+
+        self.positions = []
         self.force_left_wheels = 0
         self.force_right_wheels = 0
         self.collision_count = 0
@@ -380,10 +400,15 @@ class CorridorWithTurn(gym.Env):
         self.distance_to_goal = self.prev_distance = self.initial_distance
         self.robo_pos, self.robo_orn = p.getBasePositionAndOrientation(self.robo_id)
         self.rgba, self.depth, seg = self.robo_camera.get_frame()
-        self.positions.append(self.robo_pos)
-        p.resetBasePositionAndOrientation(self.goal_ball_body_id, [(random.random() - 0.5) * 1.5, -1, 0.6], [0, 0, 0, 1])
+        self.positions.append([self.robo_pos[0], self.robo_pos[1]])
+        # p.resetBasePositionAndOrientation(self.goal_ball_body_id, [(random.random() - 0.5) * 3, -1, 0.6],[0, 0, 0, 1])
+        '''
+        if self.reset_count % 10 == 0:
+            p.resetBasePositionAndOrientation(self.goal_ball_body_id, [0, -4, 0.6],
+                                              [0, 0, 0, 1])
+        '''
         obs = self.get_observation_vector()
-
+        self.reset_count += 1
         return obs, {}
 
     def step(self, action):
@@ -392,12 +417,15 @@ class CorridorWithTurn(gym.Env):
 
         assert action in [0, 1, 2], action
         if action == 0:
+            # forward with force 80
             self.force_right_wheels = -80
             self.force_left_wheels = -80
         elif action == 1:
+            # turn right
             self.force_right_wheels = 20
             self.force_left_wheels = -50
         elif action == 2:
+            # turn left
             self.force_right_wheels = -50
             self.force_left_wheels = 20
 
@@ -410,11 +438,26 @@ class CorridorWithTurn(gym.Env):
                                             MAX_FORCE_WHEELS])
 
         self.prev_distance = np.array(self.distance_to_goal)
-        for i in range(4):
+        for i in range(16):
             p.stepSimulation()
 
+            # Check if the agent made the robot collide with a wall or obstacle and reset the simulation if that happened
+            if self.collision_detector_avoid.in_collision():
+                print("Collision detected!")
+                self.collision_count += 1
+                reward = -1
+                truncated = True
+                break
+
+            # Check if the agent reached the goal
+            if self.collision_detector_goal.in_collision():
+                print("Goal Reached!")
+                reward = 50
+                done = True
+                break
+
         self.robo_pos, self.robo_orn = p.getBasePositionAndOrientation(self.robo_id)
-        self.positions.append(self.robo_pos)
+        self.positions.append([self.robo_pos[0], self.robo_pos[1]])
 
         head_link_state = p.getLinkState(self.robo_id, 13, computeForwardKinematics=True)
         head_link_position = np.array(head_link_state[0])
@@ -428,12 +471,23 @@ class CorridorWithTurn(gym.Env):
         self.rgba, self.depth, seg = self.robo_camera.get_frame()
         # save the frame
         # self.robo_camera.save_frame("frame.png", rgba=self.rgba)
-
-        self.distance_to_goal = np.linalg.norm(self.goal_pos - self.robo_pos)
+        # test = np.zeros((5, 5, 4))
+        # test[:,:,2] = 100
+        # testVec = test[:,:,2]
+        # b = self.rgba[::2]
+        # print(b)
 
         # Reward the agent for getting closer to the goal
+        self.distance_to_goal = np.linalg.norm(self.goal_pos - self.robo_pos)
         if self.distance_to_goal < self.prev_distance:
-            reward = 0.01
+            reward += 0.1
+
+            for i in range(len(self.rgba)):
+                for j in range(len(self.rgba[i])):
+                    if self.rgba[i][j][2] <= 0 and self.rgba[i][j][0] <= 0 >= self.rgba[i][j][1]:
+                        # print(self.rgba[i][j][2], self.rgba[i][j][0], self.rgba[i][j][1])
+                        # print('black pixel spotted')
+                        reward += 0.00005
 
         # Calculate a factor that can be used to calculate a reward depending on how close the agent is to the goal
         reward_factor = self.distance_to_goal / self.initial_distance
@@ -441,28 +495,15 @@ class CorridorWithTurn(gym.Env):
         # Reset the simulation when the agent hasn't reached the goal in a certain time frame
         if self.passed_time_steps >= MAX_TIMESTEPS_EPISODE:
             print("Didn't reach goal. Distance left:", self.distance_to_goal)
-            reward = -20
+            reward = -1
             truncated = True
 
         # Reset the simulation when the agent makes the robot fall over
         if head_link_position[2] < 0.3:
             print("Robo fell over.")
             self.robo_fell_over = 1
-            reward = -20
+            reward = -1
             truncated = True
-
-        # Check if the agent made the robot collide with a wall or obstacle and reset the simulation if that happened
-        if self.collision_detector_avoid.in_collision():
-            print("Collision detected!")
-            self.collision_count += 1
-            reward = -20
-            truncated = True
-
-        # Check if the agent reached the goal
-        if self.collision_detector_goal.in_collision():
-            print("Goal Reached!")
-            reward = 100
-            done = True
 
         if self.passed_time_steps % 500 == 0:
             rgba, depth, seg = self.above_camera.get_frame()
@@ -540,7 +581,7 @@ if __name__ == '__main__':
         # Parameters for the Exploration class' constructor:
         "initial_epsilon": 1.0,
         "final_epsilon": 0.02,
-        "epsilon_timesteps": 100000,  # Timesteps over which to anneal epsilon.
+        "epsilon_timesteps": 50000,  # Timesteps over which to anneal epsilon.
     }
 
     config = (
@@ -550,7 +591,7 @@ if __name__ == '__main__':
         .rollouts(num_rollout_workers=0, create_env_on_local_worker=True)
         # Use GPUs iff `RLLIB_NUM_GPUS` env var set to > 0.
         .resources(num_gpus=int(os.environ.get("RLLIB_NUM_GPUS", "0")))
-        .training(double_q=False, lr_schedule=[[0, 1e-3], [100000, 1e-6]], v_min=-30, v_max=100, noisy=False,
+        .training(double_q=False, lr_schedule=[[0, 1e-4], [50000, 1e-6]], v_min=-30, v_max=100, noisy=False,
                   replay_buffer_config=replay_config)
         .exploration(explore=True, exploration_config=exploration_config)
         # lr=7e-5,

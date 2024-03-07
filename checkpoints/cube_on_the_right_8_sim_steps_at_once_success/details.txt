@@ -1,0 +1,9 @@
+Simulation steps per timestep: 8
+reward for reaching goal: 50
+reward for hitting wall / not reaching goal in time: -1
+39000 Steps
+Start lr= 1x10^-4
+End lr = 1x10^-6
+epsilon greedy 1 at zero 0.02 at 50000
+actions: forward force 80, turn left, turn right
+observation space: orientation, position, wheels_force, collisions, robo_fell_over, distance_to_goal, passed_time_steps, rgba, depth
