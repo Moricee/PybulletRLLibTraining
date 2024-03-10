@@ -107,7 +107,7 @@ class CorridorWithTurn(gym.Env):
         '''
 
 
-        plane_id = p.loadURDF("plane/plane.urdf", globalScaling=2, basePosition=[2,0,0])
+        plane_id = p.loadURDF("plane.urdf", globalScaling=2, basePosition=[2,0,0])
         #plane_texture_id = p.loadTexture('textures/IllustrationForCube.bmp')
         #p.changeVisualShape(plane_id, -1, textureUniqueId=plane_texture_id)
         start_pos = [0, -5.3, 0.3]
