@@ -1,0 +1,19 @@
+reward += np.exp(-np.square((((j + 1) - len(self.rgba[i]) / 2) / len(self.rgba[i])) / 0.05)) / 200
+pro schwarzem Pixel
+
+
+-5 für verlassen der Linie  
+
+
++5 für erreichen des Endes der Linie
+
+ Checkpoint nach 13000 Schritten, durchschnittlicher Reward = 90
+
+Max reward etwa 200
+
+
+20000 Schritte vorgegeben
+
+learning rate 1*10^-4 - 6
+
+exploration epsilon 1 - 0.02   at 20000

@@ -1,46 +1,131 @@
 import os
-
-import pybullet as p
-import pyb_utils as putils
-import time
-import pybullet_data
-import numpy as np
-import gymnasium as gym
 import argparse
 import random
-from gymnasium.spaces import Discrete, Box
+from enum import Enum
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+import pybullet as p
+import pybullet_data
+import pyb_utils as putils
+
+import gymnasium as gym
+from gymnasium.spaces import Discrete
+
 import ray
 from ray import air, tune
-from ray.rllib.algorithms import Algorithm
 from ray.rllib.env.env_context import EnvContext
 from ray.rllib.utils.framework import try_import_tf, try_import_torch
 from ray.rllib.utils.test_utils import check_learning_achieved
-import matplotlib.pyplot as plt
-
-MAX_TIMESTEPS = 150000
-MAX_TIMESTEPS_EPISODE = 500
-MAX_ITERS = 500
-MAX_DISTANCE = 8
-
-GOAL_COORDINATES_X = np.array([160, 180])  # horizontal span of the goal area
-GOAL_COORDINATES_Y = np.array([230, 250])  # vertical span of the goal area
-
-ROOM_SIZE = {"X": 400,
-             "Y": 700}
-
-MAX_FORCE_WHEELS = 100
-
-IMAGE_WIDTH = 84
-IMAGE_HEIGHT = 84
-
-WALL_MASS = 1000
-
-MAX_NUM_COLLISIONS = 1
-
-OBSERVATION_SPACE_SIZE = 4 + 3 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + IMAGE_WIDTH * IMAGE_HEIGHT + IMAGE_WIDTH * IMAGE_HEIGHT * 4
+from ray.tune.logger import pretty_print
+from ray.rllib.algorithms.dqn import DQNConfig
 
 tf1, tf, tfv = try_import_tf()
 torch, nn = try_import_torch()
+
+
+# Global variables used in the environment
+class GlobalVars:
+    passed_iterations = 0
+
+
+# Contains all constants used in the environment
+class Constants:
+    MAX_TIMESTEPS = 150000
+    MAX_TIMESTEPS_EPISODE = 500
+    MAX_ITERS = 500
+    MAX_DISTANCE = 8
+
+    GOAL_POSITION = [0, 10, 0.2]
+
+    ROOM_SIZE = {"X": 400,
+                 "Y": 700}
+
+    MAX_FORCE_WHEELS = 100
+
+    IMAGE_WIDTH = 84
+    IMAGE_HEIGHT = 84
+
+    WALL_MASS = 1000
+
+    MAX_NUM_COLLISIONS = 1
+
+
+# Enum for how much of a circle should be drawn
+class CirclePortion(Enum):
+    HALF = "HALF"
+    QUARTER = "QUARTER"
+    FULL = "FULL"
+
+
+def make_curved_line(radius=1.0, position=np.array([0, 0, 0]), rotation_angle=0, portion=CirclePortion.HALF):
+    """
+    This function generates a curved line in the environment.
+    The curved line can be a full circle, half circle, or quarter circle.
+
+    Parameters:
+        radius (float): The radius of the curved line. Default is 1.0.
+        position (np.array): The position of the curved line in the environment. Default is [0, 0, 0].
+        rotation_angle (int): The rotation angle of the curved line. Default is 0.
+        portion (CirclePortion): The portion of the circle to be drawn.
+        Can be CirclePortion.HALF, CirclePortion.QUARTER, or CirclePortion.FULL. Default is CirclePortion.HALF.
+
+    Returns:
+        list: A list of object IDs for the created curved line.
+    """
+    if radius > 0.1:
+        # Create the visual shapes for the outer and inner cylinders for the curved line
+        outer_circle_cylinder_id = p.createVisualShape(p.GEOM_CYLINDER, radius=radius, length=0.01,
+                                                       rgbaColor=[0, 0, 0, 1])
+        inner_circle_cylinder_id = p.createVisualShape(p.GEOM_CYLINDER, radius=radius - 0.04, length=0.013,
+                                                       rgbaColor=[1, 1, 1, 1])
+
+        # Create the visual shape for the stopper for the curved line
+        half_circle_stopper_id = p.createVisualShape(p.GEOM_BOX, halfExtents=[radius / 2, radius, 0.013],
+                                                     rgbaColor=[1, 1, 1, 1])
+
+        quarter_circle_stopper_id = p.createVisualShape(p.GEOM_BOX, halfExtents=[radius, radius / 2, 0.013],
+                                                        rgbaColor=[1, 1, 1, 1])
+
+        # Calculate the displacement for the stoppers
+        stopper_displacement = putils.quaternion_rotate(p.getQuaternionFromAxisAngle([0, 0, 1], rotation_angle),
+                                                        [radius / 2, 0, 0])
+        second_stopper_displacement = putils.quaternion_rotate(p.getQuaternionFromAxisAngle([0, 0, 1], rotation_angle),
+                                                               [0, radius / 2, 0])
+
+        # Calculate the position for the stoppers
+        stopper_position = position + stopper_displacement
+        second_stopper_position = position + second_stopper_displacement
+
+        obj_ids = []
+
+        # Create the outer and inner cylinders
+        obj_ids.append(p.createMultiBody(baseMass=0, baseInertialFramePosition=[0, 0, 0],
+                                         baseVisualShapeIndex=outer_circle_cylinder_id, basePosition=position,
+                                         baseOrientation=[0, 0, 0, 1], useMaximalCoordinates=True))
+        obj_ids.append(p.createMultiBody(baseMass=0, baseInertialFramePosition=[0, 0, 0],
+                                         baseVisualShapeIndex=inner_circle_cylinder_id, basePosition=position,
+                                         baseOrientation=[0, 0, 0, 1], useMaximalCoordinates=True))
+
+        # Create the stoppers based on the portion of the circle to be drawn
+        if portion == CirclePortion.HALF or portion != CirclePortion.FULL:
+            obj_ids.append(p.createMultiBody(baseMass=0, baseInertialFramePosition=[0, 0, 0],
+                                             baseVisualShapeIndex=half_circle_stopper_id, basePosition=stopper_position,
+                                             baseOrientation=p.getQuaternionFromAxisAngle([0, 0, 1], rotation_angle),
+                                             useMaximalCoordinates=True))
+
+        if portion == CirclePortion.QUARTER and portion != CirclePortion.FULL:
+            obj_ids.append(p.createMultiBody(baseMass=0, baseInertialFramePosition=[0, 0, 0],
+                                             baseVisualShapeIndex=quarter_circle_stopper_id,
+                                             basePosition=second_stopper_position,
+                                             baseOrientation=p.getQuaternionFromAxisAngle([0, 0, 1], rotation_angle),
+                                             useMaximalCoordinates=True))
+
+        return obj_ids
+    else:
+        return []
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
@@ -59,13 +144,13 @@ parser.add_argument(
          "be achieved within --stop-timesteps AND --stop-iters.",
 )
 parser.add_argument(
-    "--stop-iters", type=int, default=MAX_ITERS, help="Number of iterations to train."
+    "--stop-iters", type=int, default=Constants.MAX_ITERS, help="Number of iterations to train."
 )
 parser.add_argument(
-    "--stop-timesteps", type=int, default=MAX_TIMESTEPS, help="Number of timesteps to train."
+    "--stop-timesteps", type=int, default=Constants.MAX_TIMESTEPS, help="Number of timesteps to train."
 )
 parser.add_argument(
-    "--stop-reward", type=float, default=70, help="Reward at which we stop training."
+    "--stop-reward", type=float, default=160, help="Reward at which the training should be stopped."
 )
 parser.add_argument(
     "--with-tune",
@@ -86,307 +171,176 @@ parser.add_argument(
 )
 
 
-class CorridorWithTurn(gym.Env):
-
+class FollowLines(gym.Env):
+    """
+        This class represents the environment for the reinforcement learning agent.
+        It consists of a 2D plane where the agent, represented by a robot, has to follow a line.
+        The environment is built using the PyBullet physics engine and the Gym library.
+    """
     def __init__(self, env_config: EnvContext):
-        self.end_pos = env_config["corridor_length"]
+        """
+            Initializes the environment.
+
+            Args:
+                env_config (EnvContext): The configuration for the environment.
+        """
+        # Connect to the PyBullet physics engine
         self.client_id = p.connect(p.GUI)
-        p.setAdditionalSearchPath(pybullet_data.getDataPath())  # optionally
+
+        # Set the path for the PyBullet data
+        p.setAdditionalSearchPath(pybullet_data.getDataPath())
+
+        # Set the gravity for the environment
         p.setGravity(0, 0, -10)
-        '''
-        plane_id_coll = p.createCollisionShape(p.GEOM_BOX, halfExtents=[10, 10, 0.2])
-        plane_id = p.createVisualShape(p.GEOM_BOX, halfExtents=[0.2, 10, 10], rgbaColor=[1, 1, 1, 1])
 
-        plane_object_id = p.createMultiBody(baseMass=0,
-                                            baseInertialFramePosition=[0, 0, 0],
-                                            baseCollisionShapeIndex=plane_id_coll,
-                                            baseVisualShapeIndex=plane_id,
-                                            basePosition=[0, 0, -0.2],
-                                            baseOrientation=[0, 0, 0, 1],
-                                            useMaximalCoordinates=True)
-        '''
+        # Load the plane on that the robot will move
+        plane_id = p.loadURDF("plane.urdf", globalScaling=0.5, basePosition=[2, 0, 0])
 
-
-        plane_id = p.loadURDF("plane.urdf", globalScaling=2, basePosition=[2,0,0])
-        #plane_texture_id = p.loadTexture('textures/IllustrationForCube.bmp')
-        #p.changeVisualShape(plane_id, -1, textureUniqueId=plane_texture_id)
+        # Set the starting position and orientation for the robot
         start_pos = [0, -5.3, 0.3]
-        # p.getQuaternionFromAxisAngle(angle=np.pi/2, axis=[0,0,1])
         start_orientation_walls_vert = [np.sin(np.pi / 2), 1, 0, 0]
-        start_orientation_walls_hori = [0, 0, 0, 1]
         start_orientation_robo = [0, 0, 0, 1]
-        self.robo_id = p.loadURDF("r2d2/r2d2_short.urdf", start_pos, start_orientation_robo)
+
+        # Load the robot model
+        self.robo_id = p.loadURDF("r2d2_without_arm/r2d2_short.urdf", start_pos, start_orientation_robo)
+
+        # Get the number of joints of the robot
         self.num_joints = p.getNumJoints(self.robo_id)
-        self.collision_count = 0
+
+        # Variable that will check if the robot fell over
         self.robo_fell_over = 0
-        self.prev_distance = 0
-        self.distance_to_goal = 0
+
+        # List that will store the positions of the robot
         self.positions = []
+
+        # List that will store the data
         self.data = []
-        self.force_left_wheels = 0  # Force applied to left wheels
-        self.force_right_wheels = 0  # Force applied to right wheels
+
+        # Variable that will count the number of time steps that have passed since the start of the episode
         self.passed_time_steps = 0
-        self.reset_count = 0
+
+        # Variables that will contain the forces applied to the wheels
+        self.force_left_wheels = 0
+        self.force_right_wheels = 0
+
+        # Arrays that will contain the last three frames captured by the robot's camera
+        self.rgba0 = np.zeros((Constants.IMAGE_HEIGHT, Constants.IMAGE_WIDTH, 4), np.int32)
+        self.rgba1 = np.zeros((Constants.IMAGE_HEIGHT, Constants.IMAGE_WIDTH, 4), np.int32)
+        self.rgba2 = np.zeros((Constants.IMAGE_HEIGHT, Constants.IMAGE_WIDTH, 4), np.int32)
+
+        # Print the number of joints of the robot
         print(self.num_joints)
+
+        # Print the information for each joint of the robot
         for jointIndex in range(0, self.num_joints):
             print(p.getJointInfo(self.robo_id, jointIndex))
-        robo_base_box_index = 14
 
-        # Creating the outer and inner walls of the testing grounds
+        # Create two curved lines in the environment
+        make_curved_line(1.75, np.array([3.03, -4, 0]), np.deg2rad(270), CirclePortion.HALF)
+        make_curved_line(1.75, np.array([3.03, 1, 0]), np.deg2rad(90), CirclePortion.HALF)
 
-        inner_wall_id_coll = p.createCollisionShape(p.GEOM_BOX, halfExtents=[5.9, 0.2, 1])
-        inner_wall_id = p.createVisualShape(p.GEOM_BOX, halfExtents=[5.9, 0.2, 1], rgbaColor=[0, 0.5, 0.5, 1])
+        # Create the visual and collision shapes for the straight line in the environment
+        line_id_coll = p.createCollisionShape(p.GEOM_BOX, halfExtents=[8, 0.02, 0])
+        line_id = p.createVisualShape(p.GEOM_BOX, halfExtents=[8, 0.02, 0.01], rgbaColor=[0, 0, 0, 1])
 
-        outer_wall_id_coll = p.createCollisionShape(p.GEOM_BOX, halfExtents=[5.9, 0.2, 1])
-        outer_wall_id = p.createVisualShape(p.GEOM_BOX, halfExtents=[5.9, 0.2, 1], rgbaColor=[0, 0.5, 0.5, 1])
+        line_ids = []
 
-        wall_ids = []
-
-        wall_ids.append(p.createMultiBody(baseMass=WALL_MASS,
+        # Create the straight line in the environment
+        line_ids.append(p.createMultiBody(baseMass=0,
                                           baseInertialFramePosition=[0, 0, 0],
-                                          baseCollisionShapeIndex=inner_wall_id_coll,
-                                          baseVisualShapeIndex=inner_wall_id,
-                                          basePosition=[-2, 0, 1],
+                                          baseCollisionShapeIndex=line_id_coll,
+                                          baseVisualShapeIndex=line_id,
+                                          basePosition=[0, 2.5, 0.001],
                                           baseOrientation=start_orientation_walls_vert,
                                           useMaximalCoordinates=True))
 
-        wall_ids.append(p.createMultiBody(baseMass=WALL_MASS,
-                                          baseInertialFramePosition=[0, 0, 0],
-                                          baseCollisionShapeIndex=inner_wall_id_coll,
-                                          baseVisualShapeIndex=inner_wall_id,
-                                          basePosition=[2, 0, 1],
-                                          baseOrientation=start_orientation_walls_vert,
-                                          useMaximalCoordinates=True))
-
-        wall_ids.append(p.createMultiBody(baseMass=WALL_MASS,
-                                          baseInertialFramePosition=[0, 0, 0],
-                                          baseCollisionShapeIndex=outer_wall_id_coll,
-                                          baseVisualShapeIndex=outer_wall_id,
-                                          basePosition=[-6, 0, 1],
-                                          baseOrientation=start_orientation_walls_vert,
-                                          useMaximalCoordinates=True))
-
-        wall_ids.append(p.createMultiBody(baseMass=WALL_MASS,
-                                          baseInertialFramePosition=[0, 0, 0],
-                                          baseCollisionShapeIndex=outer_wall_id_coll,
-                                          baseVisualShapeIndex=outer_wall_id,
-                                          basePosition=[6, 0, 1],
-                                          baseOrientation=start_orientation_walls_vert,
-                                          useMaximalCoordinates=True))
-
-        wall_ids.append(p.createMultiBody(baseMass=WALL_MASS,
-                                          baseInertialFramePosition=[0, 0, 0],
-                                          baseCollisionShapeIndex=outer_wall_id_coll,
-                                          baseVisualShapeIndex=outer_wall_id,
-                                          basePosition=[0, -6.1, 1],
-                                          baseOrientation=start_orientation_walls_hori,
-                                          useMaximalCoordinates=True))
-
-        wall_ids.append(p.createMultiBody(baseMass=WALL_MASS,
-                                          baseInertialFramePosition=[0, 0, 0],
-                                          baseCollisionShapeIndex=outer_wall_id_coll,
-                                          baseVisualShapeIndex=outer_wall_id,
-                                          basePosition=[0, 6.1, 1],
-                                          baseOrientation=start_orientation_walls_hori,
-                                          useMaximalCoordinates=True))
-
-        # Creating the obstacles consisting of three cubes and three cylinders
-        obstacle_cube_id_coll = p.createCollisionShape(p.GEOM_BOX, halfExtents=[0.5, 0.5, 0.5])
-        obstacle_cube_id = p.createVisualShape(p.GEOM_BOX, halfExtents=[0.5, 0.5, 0.5], rgbaColor=[0.5, 0, 0.2, 1])
-
-        obstacle_cyl_id_coll = p.createCollisionShape(p.GEOM_CYLINDER, radius=0.25)
-        obstacle_cyl_id = p.createVisualShape(p.GEOM_CYLINDER, radius=0.25, rgbaColor=[0, 0.5, 0.5, 1])
-
-        obstacle_ids = []
-        '''
-        obstacle_ids.append(p.createMultiBody(baseMass=WALL_MASS,
-                                              baseInertialFramePosition=[0, 0, 0],
-                                              baseCollisionShapeIndex=obstacle_cube_id_coll,
-                                              baseVisualShapeIndex=obstacle_cube_id,
-                                              basePosition=[0.5, 0.5, 0.6],
-                                              baseOrientation=start_orientation_walls_hori,
-                                              useMaximalCoordinates=True))
-
-        obstacle_ids.append(p.createMultiBody(baseMass=WALL_MASS,
-                                              baseInertialFramePosition=[0, 0, 0],
-                                              baseCollisionShapeIndex=obstacle_cube_id_coll,
-                                              baseVisualShapeIndex=obstacle_cube_id,
-                                              basePosition=[1, -2, 0.6],
-                                              baseOrientation=start_orientation_walls_hori,
-                                              useMaximalCoordinates=True))
-
-        obstacle_ids.append(p.createMultiBody(baseMass=WALL_MASS,
-                                              baseInertialFramePosition=[0, 0, 0],
-                                              baseCollisionShapeIndex=obstacle_cube_id_coll,
-                                              baseVisualShapeIndex=obstacle_cube_id,
-                                              basePosition=[-0.8, 3, 0.6],
-                                              baseOrientation=start_orientation_walls_hori,
-                                              useMaximalCoordinates=True))
-
-        
-
-        obstacle_ids.append(p.createMultiBody(baseMass=WALL_MASS,
-                                              baseInertialFramePosition=[0, 0, 0],
-                                              baseCollisionShapeIndex=obstacle_cyl_id_coll,
-                                              baseVisualShapeIndex=obstacle_cyl_id,
-                                              basePosition=[-1, -2, 0.6],
-                                              baseOrientation=start_orientation_walls_hori,
-                                              useMaximalCoordinates=True))
-
-        obstacle_ids.append(p.createMultiBody(baseMass=WALL_MASS,
-                                              baseInertialFramePosition=[0, 0, 0],
-                                              baseCollisionShapeIndex=obstacle_cyl_id_coll,
-                                              baseVisualShapeIndex=obstacle_cyl_id,
-                                              basePosition=[0.2, 3, 0.6],
-                                              baseOrientation=start_orientation_walls_hori,
-                                              useMaximalCoordinates=True))
-                                              
-        '''
-        obstacle_ids.append(p.createMultiBody(baseMass=WALL_MASS,
-                                              baseInertialFramePosition=[0, 0, 0],
-                                              baseCollisionShapeIndex=obstacle_cyl_id_coll,
-                                              baseVisualShapeIndex=obstacle_cyl_id,
-                                              basePosition=[0, -3, 0.6],
-                                              baseOrientation=start_orientation_walls_hori,
-                                              useMaximalCoordinates=True))
-
-        # Creating a wall behind the ball so the robo can't drive too far behind it
-        obstacle_wall_id_coll = p.createCollisionShape(p.GEOM_BOX, halfExtents=[1.8, 0.5, 1])
-        obstacle_wall_id = p.createVisualShape(p.GEOM_BOX, halfExtents=[1.8, 0.5, 1], rgbaColor=[0.5, 0, 0.5, 1])
-
-        obstacle_ids.append(p.createMultiBody(baseMass=WALL_MASS,
-                                              baseInertialFramePosition=[0, 0, 0],
-                                              baseCollisionShapeIndex=obstacle_wall_id_coll,
-                                              baseVisualShapeIndex=obstacle_wall_id,
-                                              basePosition=[0, 0.2, 1],
-                                              baseOrientation=start_orientation_walls_hori,
-                                              useMaximalCoordinates=True))
-
-        collision_pairs = []
-        for i in range(0, len(wall_ids)):
-            collision_pairs.append((self.robo_id, wall_ids[i]))
-
-        for i in range(0, len(obstacle_ids)):
-            collision_pairs.append((self.robo_id, obstacle_ids[i]))
-
-        self.collision_detector_avoid = putils.collision.CollisionDetector(self.client_id, collision_pairs)
-
-        goal_box_id_coll = p.createCollisionShape(p.GEOM_BOX, halfExtents=[0.3, 0.3, 0.3])
-        goal_box_id = p.createVisualShape(p.GEOM_BOX, halfExtents=[0.3, 0.3, 0.3], rgbaColor=[0, 0, 0, 1])
-
-        self.goal_ball_body_id = p.createMultiBody(baseMass=p.GEOM_BOX,
-                                                   baseInertialFramePosition=[0, 0, 0],
-                                                   baseCollisionShapeIndex=goal_box_id_coll,
-                                                   baseVisualShapeIndex=goal_box_id,
-                                                   basePosition=[0, -1, 0.6],
-                                                   baseOrientation=start_orientation_walls_hori,
-                                                   useMaximalCoordinates=True)
-
-        self.collision_detector_goal = putils.CollisionDetector(self.client_id,
-                                                                [(self.robo_id, self.goal_ball_body_id)])
-
-        self.goal_pos, goal_orientation = p.getBasePositionAndOrientation(self.goal_ball_body_id)
-        self.goal_pos = np.array(self.goal_pos)
-
-        robo_pos, robo_orn = p.getBasePositionAndOrientation(self.robo_id)
-        robo_pos = np.array(robo_pos)
-        self.initial_distance = np.linalg.norm(self.goal_pos - robo_pos)
-        print("Initial distance to goal:", self.initial_distance)
-        self.prev_distance = self.initial_distance
-
-        self.above_camera = putils.Camera.from_camera_position(
-            camera_position=(0, 0.1, 10),
-            target_position=(0, 0, 0),
-            near=0.1,
-            far=20,
-            width=100,
-            height=100,
-        )
-
-        self.above_camera.set_camera_pose([0, 0.1, 10], [0, 0, 0])
-
+        # Get the state of the head link of the robot
         head_link_state = p.getLinkState(self.robo_id, 13, computeForwardKinematics=True)
+
+        # Get the position and orientation of the head link
         link_position = np.array(head_link_state[0])
         link_orientation = head_link_state[1]
 
-        camera_position = np.array(link_position)
-        camera_position -= link_position
-        camera_position = putils.quaternion_rotate(link_orientation, camera_position)
+        # Calculate the position of the camera and the target position
         point_in_front_of_camera = np.array(putils.quaternion_rotate(link_orientation, np.array([0, 0.2, 0.4])))
-        camera_position += point_in_front_of_camera
-        camera_position += link_position
+        camera_position = link_position + point_in_front_of_camera
 
-        # print("Camera position:", camera_position)
+        point_in_front_of_camera = np.array(putils.quaternion_rotate(link_orientation, np.array([0, 0.2, 0.3])))
+        target_position = camera_position + point_in_front_of_camera
 
-        target_position = np.array(camera_position)
-        target_position += point_in_front_of_camera
-
-        # print("Camera and target position:", camera_position, target_position)
-        '''
-        self.robo_camera = putils.Camera.from_camera_position(
-            camera_position=camera_position,
-            target_position=target_position,
-            near=0.1,
-            far=20,
-            width=IMAGE_WIDTH,
-            height=IMAGE_HEIGHT,
-        )
-        '''
-
+        # Initialize the camera of the robot
         self.robo_camera = putils.Camera.from_distance_rpy(target_position=target_position, distance=0.2, near=0.001,
-                                                           far=20, width=IMAGE_WIDTH, height=IMAGE_HEIGHT, fov=90)
-        self.robo_camera.set_camera_pose(camera_position, target_position)
-        rgba, depth, seg = self.robo_camera.get_frame()
-        self.rgba = np.array(rgba)
-        self.depth = np.array(depth)
-        print(self.depth.shape)
-        self.robo_pos, self.robo_orn = p.getBasePositionAndOrientation(self.robo_id)
-        # save the frame
-        self.above_camera.save_frame("frame.png", rgba=rgba)
+                                                           far=20, width=Constants.IMAGE_WIDTH,
+                                                           height=Constants.IMAGE_HEIGHT, fov=80)
 
+        # Set the pose of the camera
+        self.robo_camera.set_camera_pose(camera_position, target_position)
+
+        # Get the initial frame from the camera
+        rgba, depth, seg = self.robo_camera.get_frame()
+        self.rgba = np.array(rgba, dtype=np.int32)
+
+        # Get the position and orientation of the robot
+        self.robo_pos, self.robo_orn = p.getBasePositionAndOrientation(self.robo_id)
+
+        # Set up the action and observation spaces
         self.action_space = Discrete(3)
 
         spaces = {}
-        spaces["orientation"] = gym.spaces.Box(low=np.full(4, -1.1), high=np.full(4, 1.1), dtype=np.float64)
-        spaces["position"] = gym.spaces.Box(low=np.full(3, -6), high=np.full(3, 6), dtype=np.float64)
-        spaces["wheels_force"] = gym.spaces.Box(low=np.full(2, -MAX_FORCE_WHEELS), high=np.full(2, MAX_FORCE_WHEELS),
-                                                dtype=np.float64)
-        spaces["collisions"] = gym.spaces.Box(low=np.array(0), high=np.array(MAX_NUM_COLLISIONS + 1), dtype=np.int32)
-        spaces["robo_fell_over"] = gym.spaces.Box(low=np.array(0), high=np.array(1 + 1), dtype=np.int32)
-        spaces["distance_to_goal"] = gym.spaces.Box(low=np.array(0),
-                                                    high=np.array(MAX_DISTANCE), dtype=np.float64)
-        spaces["passed_time_steps"] = gym.spaces.Box(low=np.array(0), high=np.array(MAX_TIMESTEPS_EPISODE + 1),
-                                                     dtype=np.int32)
-        spaces["rgba"] = gym.spaces.Box(low=np.full((IMAGE_HEIGHT, IMAGE_WIDTH, 4), 0),
-                                        high=np.full((IMAGE_HEIGHT, IMAGE_WIDTH, 4), 255 + 1), dtype=np.float64)
 
-        spaces["depth"] = gym.spaces.Box(low=np.full((IMAGE_HEIGHT, IMAGE_WIDTH), 0),
-                                         high=np.full((IMAGE_HEIGHT, IMAGE_WIDTH), 1.1), dtype=np.float64)
+        # Define the observation spaces
+        spaces["rgba0"] = gym.spaces.Box(low=np.full((Constants.IMAGE_HEIGHT, Constants.IMAGE_WIDTH, 4), 0),
+                                         high=np.full((Constants.IMAGE_HEIGHT, Constants.IMAGE_WIDTH, 4), 255 + 1),
+                                         dtype=np.int32)
+        spaces["rgba1"] = gym.spaces.Box(low=np.full((Constants.IMAGE_HEIGHT, Constants.IMAGE_WIDTH, 4), 0),
+                                         high=np.full((Constants.IMAGE_HEIGHT, Constants.IMAGE_WIDTH, 4), 255 + 1),
+                                         dtype=np.int32)
+        spaces["rgba2"] = gym.spaces.Box(low=np.full((Constants.IMAGE_HEIGHT, Constants.IMAGE_WIDTH, 4), 0),
+                                         high=np.full((Constants.IMAGE_HEIGHT, Constants.IMAGE_WIDTH, 4), 255 + 1),
+                                         dtype=np.int32)
 
         self.observation_space = gym.spaces.Dict(spaces)
 
+        # Save the initial state of the environment
         self.initial_state = p.saveState()
-        # Set the seed. This is only used for the final (reach goal) reward.
-        self.reset(seed=env_config.worker_index * env_config.num_workers)
+
+        self.reset()
 
     def get_observation_vector(self):
+        """
+        This method generates an observation vector for the reinforcement learning agent.
+        The observation vector consists of the last three frames captured by the robot's camera.
+        Each frame is represented as a 3D numpy array (height, width, RGBA),
+        where RGBA stands for Red, Green, Blue, and Alpha channels of each pixel.
+
+        Returns:
+            dict: A dictionary containing the last three frames captured by the robot's camera.
+            The newest frame is stored in the key "rgba2", the second newest frame is stored in the key "rgba1",
+            the oldest frame is stored in the key "rgba0".
+            The keys are "rgba0", "rgba1", and "rgba2".
+        """
         obs = {}
-        obs["orientation"] = np.array(self.robo_orn)
-        obs["position"] = np.array(self.robo_pos)
-        obs["wheels_force"] = np.array([self.force_left_wheels, self.force_right_wheels], dtype=np.float64)
-        obs["collisions"] = np.array(self.collision_count, dtype=np.int32)
-        obs["robo_fell_over"] = np.array(self.robo_fell_over, dtype=np.int32)
-        obs["distance_to_goal"] = np.array(self.distance_to_goal, dtype=np.float64)
-        obs["passed_time_steps"] = np.array(self.passed_time_steps, dtype=np.int32)
-        obs["rgba"] = np.array(self.rgba, dtype=np.float64)
-        obs["depth"] = np.array(self.depth, dtype=np.float64)
-        # print(obs)
+
+        # Shift the old frames
+        self.rgba0 = np.array(self.rgba1)
+        self.rgba1 = np.array(self.rgba2)
+
+        # Store the current frame
+        self.rgba2 = np.array(self.rgba)
+
+        # Add the frames to the observation vector
+        obs["rgba0"] = self.rgba0
+        obs["rgba1"] = self.rgba1
+        obs["rgba2"] = self.rgba2
+
+        # Return the observation vector
         return obs
 
     def reset(self, *, seed=None, options=None):
         random.seed(seed)
+        # Reset the simulation
         p.restoreState(self.initial_state)
-        lines = ['Readme', 'How to write text files in Python']
+        # Append the positions list to a file. It contains the positions of the robot during the last episode
         with open('positions.txt', 'a') as f:
             f.write(str(self.positions))
             f.write('\n')
@@ -394,67 +348,52 @@ class CorridorWithTurn(gym.Env):
         self.positions = []
         self.force_left_wheels = 0
         self.force_right_wheels = 0
-        self.collision_count = 0
-        self.passed_time_steps = 0
-        self.robo_fell_over = 0
-        self.distance_to_goal = self.prev_distance = self.initial_distance
+
+        # Place the robot at a different starting position after 10 iterations
+        if GlobalVars.passed_iterations > 9:
+            p.resetBasePositionAndOrientation(self.robo_id, [1.25, -4.2, 0.3], [0, 0, 0, 1])
         self.robo_pos, self.robo_orn = p.getBasePositionAndOrientation(self.robo_id)
+
+        # Get the initial frame from the camera
         self.rgba, self.depth, seg = self.robo_camera.get_frame()
+
+        # Append the robots start position to the positions list
         self.positions.append([self.robo_pos[0], self.robo_pos[1]])
-        # p.resetBasePositionAndOrientation(self.goal_ball_body_id, [(random.random() - 0.5) * 3, -1, 0.6],[0, 0, 0, 1])
-        '''
-        if self.reset_count % 10 == 0:
-            p.resetBasePositionAndOrientation(self.goal_ball_body_id, [0, -4, 0.6],
-                                              [0, 0, 0, 1])
-        '''
         obs = self.get_observation_vector()
-        self.reset_count += 1
         return obs, {}
 
     def step(self, action):
         reward = 0
         done = truncated = False
 
+        # Set the force applied to the wheels based on the action
         assert action in [0, 1, 2], action
         if action == 0:
-            # forward with force 80
-            self.force_right_wheels = -80
-            self.force_left_wheels = -80
+            # forward with force 40
+            self.force_right_wheels = -40
+            self.force_left_wheels = -40
         elif action == 1:
             # turn right
-            self.force_right_wheels = 20
-            self.force_left_wheels = -50
+            self.force_right_wheels = 0
+            self.force_left_wheels = -40
         elif action == 2:
             # turn left
-            self.force_right_wheels = -50
-            self.force_left_wheels = 20
+            self.force_right_wheels = -40
+            self.force_left_wheels = 0
 
+        # Apply the forces to the wheels
         p.setJointMotorControlArray(bodyIndex=self.robo_id,
                                     jointIndices=[2, 3, 6, 7],
                                     controlMode=p.VELOCITY_CONTROL,
                                     targetVelocities=[self.force_right_wheels, self.force_right_wheels,
                                                       self.force_left_wheels, self.force_left_wheels],
-                                    forces=[MAX_FORCE_WHEELS, MAX_FORCE_WHEELS, MAX_FORCE_WHEELS,
-                                            MAX_FORCE_WHEELS])
+                                    forces=[Constants.MAX_FORCE_WHEELS, Constants.MAX_FORCE_WHEELS,
+                                            Constants.MAX_FORCE_WHEELS,
+                                            Constants.MAX_FORCE_WHEELS])
 
-        self.prev_distance = np.array(self.distance_to_goal)
-        for i in range(16):
+        # Run the simulation for 24 steps with the chosen action
+        for i in range(24):
             p.stepSimulation()
-
-            # Check if the agent made the robot collide with a wall or obstacle and reset the simulation if that happened
-            if self.collision_detector_avoid.in_collision():
-                print("Collision detected!")
-                self.collision_count += 1
-                reward = -1
-                truncated = True
-                break
-
-            # Check if the agent reached the goal
-            if self.collision_detector_goal.in_collision():
-                print("Goal Reached!")
-                reward = 50
-                done = True
-                break
 
         self.robo_pos, self.robo_orn = p.getBasePositionAndOrientation(self.robo_id)
         self.positions.append([self.robo_pos[0], self.robo_pos[1]])
@@ -463,39 +402,44 @@ class CorridorWithTurn(gym.Env):
         head_link_position = np.array(head_link_state[0])
         head_link_orientation = head_link_state[1]
 
-        camera_position, target_position = self.calculate_camera_position_and_orientation(head_link_orientation,
-                                                                                          head_link_position)
+        camera_position, target_position = calculate_camera_position_and_orientation(head_link_orientation,
+                                                                                     head_link_position)
 
         self.robo_camera.set_camera_pose(camera_position, target_position)
 
         self.rgba, self.depth, seg = self.robo_camera.get_frame()
         # save the frame
         # self.robo_camera.save_frame("frame.png", rgba=self.rgba)
-        # test = np.zeros((5, 5, 4))
-        # test[:,:,2] = 100
-        # testVec = test[:,:,2]
-        # b = self.rgba[::2]
-        # print(b)
 
-        # Reward the agent for getting closer to the goal
-        self.distance_to_goal = np.linalg.norm(self.goal_pos - self.robo_pos)
-        if self.distance_to_goal < self.prev_distance:
-            reward += 0.1
+        black_line_visible = False
+        # Reward the agent for keeping the black line in the center of the screen
+        # Iterate over the height of the image
+        for i in range(len(self.rgba)):
+            # Iterate over the width of the image
+            for j in range(len(self.rgba[i])):
+                # Check if the pixel at (i, j) is black
+                if self.rgba[i][j][2] <= 0 and self.rgba[i][j][0] <= 0 >= self.rgba[i][j][1]:
+                    black_line_visible = True
+                    # Old reward calculation that uses a linear function
+                    '''
+                    if j < len(self.rgba[i]):
+                        reward += np.abs((j / (len(self.rgba[i]) / 2)) / 1000)
+                    else:
+                        reward += np.abs((2 - j / (len(self.rgba[i]) / 2)) / 1000)
+                    '''
+                    # Calculate a reward based on the position of the black pixel in the image
+                    # The reward is calculated using a Gaussian function, that is centered in the middle of the image
+                    # The closer the black pixel is to the center of the image, the higher the reward
+                    # This encourages the agent to keep the black line in the center of the image
+                    reward += np.exp(
+                        -np.square(
+                            (((j + 1) - len(self.rgba[i]) / 2) / len(self.rgba[i])) / 0.05
+                        )
+                    ) / 200
 
-            for i in range(len(self.rgba)):
-                for j in range(len(self.rgba[i])):
-                    if self.rgba[i][j][2] <= 0 and self.rgba[i][j][0] <= 0 >= self.rgba[i][j][1]:
-                        # print(self.rgba[i][j][2], self.rgba[i][j][0], self.rgba[i][j][1])
-                        # print('black pixel spotted')
-                        reward += 0.00005
-
-        # Calculate a factor that can be used to calculate a reward depending on how close the agent is to the goal
-        reward_factor = self.distance_to_goal / self.initial_distance
-
-        # Reset the simulation when the agent hasn't reached the goal in a certain time frame
-        if self.passed_time_steps >= MAX_TIMESTEPS_EPISODE:
-            print("Didn't reach goal. Distance left:", self.distance_to_goal)
-            reward = -1
+        # Agent lost the line
+        if not black_line_visible:
+            reward = -5
             truncated = True
 
         # Reset the simulation when the agent makes the robot fall over
@@ -505,16 +449,10 @@ class CorridorWithTurn(gym.Env):
             reward = -1
             truncated = True
 
-        if self.passed_time_steps % 500 == 0:
-            rgba, depth, seg = self.above_camera.get_frame()
-
-            # save the frame
-            self.above_camera.save_frame("frame.png", rgba=rgba)
-
         self.passed_time_steps += 1
 
         obs = self.get_observation_vector()
-        # print(obs[0:15])
+        # print(reward)
 
         return (
             obs,
@@ -524,21 +462,16 @@ class CorridorWithTurn(gym.Env):
             {},
         )
 
-    # Calculates the position and orientation for the front camera of the robot
-    def calculate_camera_position_and_orientation(self, head_link_orientation, head_link_position):
-        # Rotate the camera in the direction the robot head link points
-        camera_position = np.array(head_link_position)
-        camera_position -= head_link_position
-        camera_position = putils.quaternion_rotate(head_link_orientation, camera_position)
-        # Vector used to move the camera in front of the head and the camera target in front of the camera
-        point_in_front_of_camera = np.array(putils.quaternion_rotate(head_link_orientation, np.array([0, 0.2, 0])))
-        camera_position += point_in_front_of_camera
-        # Move the camera in front of the head and put the target in front of it, so it is oriented ahead of the robot
-        camera_position += head_link_position
-        target_position = np.array(camera_position)
-        target_position += point_in_front_of_camera
-        # print("Camera and target position:", camera_position, target_position)
-        return camera_position, target_position
+
+# Calculates the position and orientation for the front camera of the robot
+def calculate_camera_position_and_orientation(head_link_orientation, head_link_position):
+    # Calculate the camera position
+    camera_position = head_link_position + putils.quaternion_rotate(head_link_orientation, np.array([0, 0.2, 0]))
+
+    # Calculate the target position
+    target_position = camera_position + putils.quaternion_rotate(head_link_orientation, np.array([0, 0.2, -0.4]))
+
+    return camera_position, target_position
 
 
 def plt_image(img):
@@ -547,8 +480,15 @@ def plt_image(img):
     plt.show()
 
 
-from ray.tune.logger import pretty_print
-from ray.rllib.algorithms.dqn import DQNConfig
+def create_checkpoint():
+    save_result = algo.save()
+    path_to_checkpoint = save_result.checkpoint.path
+    print(
+        "An Algorithm checkpoint has been created inside directory: "
+        f"'{path_to_checkpoint}'."
+    )
+    return path_to_checkpoint
+
 
 if __name__ == '__main__':
 
@@ -581,21 +521,21 @@ if __name__ == '__main__':
         # Parameters for the Exploration class' constructor:
         "initial_epsilon": 1.0,
         "final_epsilon": 0.02,
-        "epsilon_timesteps": 50000,  # Timesteps over which to anneal epsilon.
+        "epsilon_timesteps": 10000,  # Timesteps over which to anneal epsilon.
     }
 
     config = (
         DQNConfig(args.run)
-        .environment(CorridorWithTurn, env_config={"corridor_length": 350})
+        .environment(FollowLines, env_config={})
         .framework(args.framework)
         .rollouts(num_rollout_workers=0, create_env_on_local_worker=True)
         # Use GPUs iff `RLLIB_NUM_GPUS` env var set to > 0.
         .resources(num_gpus=int(os.environ.get("RLLIB_NUM_GPUS", "0")))
-        .training(double_q=False, lr_schedule=[[0, 1e-4], [50000, 1e-6]], v_min=-30, v_max=100, noisy=False,
+        .training(double_q=False, v_min=-30, lr_schedule=[[0, 1e-4], [10000, 1e-6]], v_max=100, noisy=False,
                   replay_buffer_config=replay_config)
         .exploration(explore=True, exploration_config=exploration_config)
         # lr=7e-5,
-        #
+        # lr_schedule=[[0, 1e-4], [20000, 1e-6]],
     )
     config.gamma = 0.999
 
@@ -622,13 +562,11 @@ if __name__ == '__main__':
 
     else:
         print("Running manual train loop without Ray Tune.")
-        # use fixed learning rate instead of grid search (needs tune)
-        # config.lr = 1e-3
         algo = config.build()
-
         if args.restore_from_checkpoint != "":
             algo.restore(args.restore_from_checkpoint)
             result = algo.train()
+
             args.stop_iters += result["training_iteration"]
             args.stop_timesteps += result["timesteps_total"]
 
@@ -636,8 +574,45 @@ if __name__ == '__main__':
         steps = 0
         for _ in range(args.stop_iters):
             result = algo.train()
+            print(result['training_iteration'])
+            GlobalVars.passed_iterations = result['training_iteration']
+            print('Counted iterations + 1')
             print("Current Exploration Epsilon:", algo.get_policy().get_exploration_state()['cur_epsilon'])
             print(pretty_print(result))
+            if GlobalVars.passed_iterations == 10:
+                path = create_checkpoint()
+
+                algo.stop()
+                p.disconnect()
+
+                new_exploration_config = {
+                    # Exploration sub-class by name or full path to module+class
+                    # (e.g. “ray.rllib.utils.exploration.epsilon_greedy.EpsilonGreedy”)
+                    "type": "EpsilonGreedy",
+                    # Parameters for the Exploration class' constructor:
+                    "initial_epsilon": 0.5,
+                    "final_epsilon": 0.02,
+                    "epsilon_timesteps": 20000,  # Timesteps over which to anneal epsilon.
+                }
+
+                new_config = (
+                    DQNConfig(args.run)
+                    .environment(FollowLines, env_config={})
+                    .framework(args.framework)
+                    .rollouts(num_rollout_workers=0, create_env_on_local_worker=True)
+                    # Use GPUs iff `RLLIB_NUM_GPUS` env var set to > 0.
+                    .resources(num_gpus=int(os.environ.get("RLLIB_NUM_GPUS", "0")))
+                    .training(double_q=False, v_min=-30, lr_schedule=[[10000, 1e-4], [20000, 1e-6]], v_max=100,
+                              noisy=False,
+                              replay_buffer_config=replay_config)
+                    .exploration(explore=True, exploration_config=new_exploration_config)
+                    # lr=7e-5,
+                    # lr_schedule=[[0, 1e-4], [20000, 1e-6]],
+                )
+                # config.gamma = 0.999
+                algo = new_config.build()
+                algo.restore(path)
+
             # stop training of the target train steps or reward are reached
             if (
                     result["timesteps_total"] >= args.stop_timesteps
@@ -645,22 +620,116 @@ if __name__ == '__main__':
             ):
                 break
 
-        save_result = algo.save()
-        path_to_checkpoint = save_result.checkpoint.path
-        print(
-            "An Algorithm checkpoint has been created inside directory: "
-            f"'{path_to_checkpoint}'."
-        )
+        path = create_checkpoint()
         algo.stop()
 
     ray.shutdown()
 
-    # Moving the agent's head to the target position
+# Old way of creating a curved line. This is now done using the make_curved_line function.
+'''
+        small_line_id_coll = p.createCollisionShape(p.GEOM_BOX, halfExtents=[0.5, 0.02, 0])
+        small_line_id = p.createVisualShape(p.GEOM_BOX, halfExtents=[0.5, 0.02, 0.01], rgbaColor=[0, 0, 0, 1])
 
-    # Receiving and applying commands to the agent
+        # Curve Lines
+        line_ids.append(p.createMultiBody(baseMass=0,
+                                          baseInertialFramePosition=[0, 0, 0],
+                                          baseCollisionShapeIndex=small_line_id_coll,
+                                          baseVisualShapeIndex=small_line_id,
+                                          basePosition=[4.71, -0.92, 0.001],
+                                          baseOrientation=[np.sin(np.pi / 2), 1, 0, 0],
+                                          useMaximalCoordinates=True))
 
-    # Storing the position of the agent's head
+        line_ids.append(p.createMultiBody(baseMass=0,
+                                          baseInertialFramePosition=[0, 0, 0],
+                                          baseCollisionShapeIndex=small_line_id_coll,
+                                          baseVisualShapeIndex=small_line_id,
+                                          basePosition=[4.85, 0, 0.001],
+                                          baseOrientation=p.getQuaternionFromEuler([0, 0, np.pi/2.5]),
+                                          useMaximalCoordinates=True))
 
-    # Assigning a reward to the agent
+        line_ids.append(p.createMultiBody(baseMass=0,
+                                          baseInertialFramePosition=[0, 0, 0],
+                                          baseCollisionShapeIndex=small_line_id_coll,
+                                          baseVisualShapeIndex=small_line_id,
+                                          basePosition=[5.26, 0.9, 0.001],
+                                          baseOrientation=p.getQuaternionFromEuler([0, 0, np.pi/3]),
+                                          useMaximalCoordinates=True))
 
-    # Converting the positions list to a numpy array and printing it
+        line_ids.append(p.createMultiBody(baseMass=0,
+                                          baseInertialFramePosition=[0, 0, 0],
+                                          baseCollisionShapeIndex=small_line_id_coll,
+                                          baseVisualShapeIndex=small_line_id,
+                                          basePosition=[5.8, 1.6, 0.001],
+                                          baseOrientation=p.getQuaternionFromEuler([0, 0, np.pi/4]),
+                                          useMaximalCoordinates=True))
+
+        line_ids.append(p.createMultiBody(baseMass=0,
+                                          baseInertialFramePosition=[0, 0, 0],
+                                          baseCollisionShapeIndex=small_line_id_coll,
+                                          baseVisualShapeIndex=small_line_id,
+                                          basePosition=[6.6, 2.2, 0.001],
+                                          baseOrientation=p.getQuaternionFromEuler([0, 0, np.pi / 6]),
+                                          useMaximalCoordinates=True))
+
+        line_ids.append(p.createMultiBody(baseMass=0,
+                                          baseInertialFramePosition=[0, 0, 0],
+                                          baseCollisionShapeIndex=small_line_id_coll,
+                                          baseVisualShapeIndex=small_line_id,
+                                          basePosition=[7.5, 2.45, 0.001],
+                                          baseOrientation=p.getQuaternionFromEuler([0, 0, 0]),
+                                          useMaximalCoordinates=True))
+
+        line_ids.append(p.createMultiBody(baseMass=0,
+                                          baseInertialFramePosition=[0, 0, 0],
+                                          baseCollisionShapeIndex=small_line_id_coll,
+                                          baseVisualShapeIndex=small_line_id,
+                                          basePosition=[8.4, 2.25, 0.001],
+                                          baseOrientation=p.getQuaternionFromEuler([0, 0, np.pi + (np.pi / 1.15)]),
+                                          useMaximalCoordinates=True))
+
+        line_ids.append(p.createMultiBody(baseMass=0,
+                                          baseInertialFramePosition=[0, 0, 0],
+                                          baseCollisionShapeIndex=small_line_id_coll,
+                                          baseVisualShapeIndex=small_line_id,
+                                          basePosition=[9.2, 1.70, 0.001],
+                                          baseOrientation=p.getQuaternionFromEuler([0, 0, np.pi + (np.pi / 1.35)]),
+                                          useMaximalCoordinates=True))
+
+        line_ids.append(p.createMultiBody(baseMass=0,
+                                          baseInertialFramePosition=[0, 0, 0],
+                                          baseCollisionShapeIndex=small_line_id_coll,
+                                          baseVisualShapeIndex=small_line_id,
+                                          basePosition=[9.72, 0.90, 0.001],
+                                          baseOrientation=p.getQuaternionFromEuler([0, 0, np.pi + (np.pi / 1.6)]),
+                                          useMaximalCoordinates=True))
+
+        line_ids.append(p.createMultiBody(baseMass=0,
+                                          baseInertialFramePosition=[0, 0, 0],
+                                          baseCollisionShapeIndex=small_line_id_coll,
+                                          baseVisualShapeIndex=small_line_id,
+                                          basePosition=[9.98, 0.0, 0.001],
+                                          baseOrientation=p.getQuaternionFromEuler([0, 0, np.pi + (np.pi / 1.8)]),
+                                          useMaximalCoordinates=True))
+
+        line_ids.append(p.createMultiBody(baseMass=0,
+                                          baseInertialFramePosition=[0, 0, 0],
+                                          baseCollisionShapeIndex=small_line_id_coll,
+                                          baseVisualShapeIndex=small_line_id,
+                                          basePosition=[10.06, -0.98, 0.001],
+                                          baseOrientation=p.getQuaternionFromEuler([0, 0, np.pi + (np.pi / 2)]),
+                                          useMaximalCoordinates=True))
+
+        goal_box_id_coll = p.createCollisionShape(p.GEOM_BOX, halfExtents=[0.2, 0.2, 0.2])
+        goal_box_id = p.createVisualShape(p.GEOM_BOX, halfExtents=[0.2, 0.2, 0.2], rgbaColor=[0, 0, 1, 0])
+
+        self.goal_ball_body_id = p.createMultiBody(baseMass=0,
+                                                   baseInertialFramePosition=[0, 0, 0],
+                                                   baseCollisionShapeIndex=goal_box_id_coll,
+                                                   baseVisualShapeIndex=goal_box_id,
+                                                   basePosition=Constants.GOAL_POSITION,
+                                                   baseOrientation=start_orientation_walls_hori,
+                                                   useMaximalCoordinates=True)
+
+        self.collision_detector_goal = putils.CollisionDetector(self.client_id,
+                                                                [(self.robo_id, self.goal_ball_body_id)])
+        '''
