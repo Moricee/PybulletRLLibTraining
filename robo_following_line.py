@@ -2,6 +2,7 @@ import os
 import argparse
 import random
 from enum import Enum
+import time
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -28,28 +29,38 @@ torch, nn = try_import_torch()
 # Global variables used in the environment
 class GlobalVars:
     passed_iterations = 0
+'''
+Einleitung für eine Masterarbeit zu dem Thema:
+- Reinforcement Learning
+- PyBullet
+- Roboter, der einer Linie folgt
+- Ray RLlib
+In dieser Arbeit geht es um die Entwicklung eines Reinforcement Learning Algorithmus, der einen Roboter in einer 2D-Umgebung steuert.
+ Der Roboter soll einer Linie folgen, die in der Umgebung gezeichnet ist. Die Umgebung wird in PyBullet erstellt und der Algorithmus wird mit Ray RLlib entwickelt.
+Der Roboter wird mit einem tiefen neuronalen Netzwerk trainiert, das mit der Bibliothek PyTorch erstellt wird. Das neuronale Netzwerk wird mit dem Deep Q-Learning Algorithmus trainiert.
+Das Ziel der Arbeit ist es, einen Agenten kontinuierlich zu trainieren, sodass er einzelne Tasks lernen kann und sie anschließend zusammen ausführen kann, ohne alle Tasks gleichzeitig zu trainieren.
 
+'''
 
 # Contains all constants used in the environment
 class Constants:
-    MAX_TIMESTEPS = 150000
-    MAX_TIMESTEPS_EPISODE = 500
-    MAX_ITERS = 500
-    MAX_DISTANCE = 8
-
-    GOAL_POSITION = [0, 10, 0.2]
-
-    ROOM_SIZE = {"X": 400,
-                 "Y": 700}
-
-    MAX_FORCE_WHEELS = 100
+    STOP_TIMESTEPS = 150000
+    ITERS_PER_PHASE = 10
+    TIMESTEPS_PER_PHASE = ITERS_PER_PHASE * 1000
+    NUMBER_OF_PHASES = 4
+    
+    STOP_ITERS = 500
+    
+    FORCE_WHEELS = 60
+    FORCE_WHEELS_TURN = 30
 
     IMAGE_WIDTH = 84
     IMAGE_HEIGHT = 84
 
-    WALL_MASS = 1000
-
     MAX_NUM_COLLISIONS = 1
+
+    REPLAY_BUFFER_SIZE = 3000
+    STOP_REWARD = 160
 
 
 # Enum for how much of a circle should be drawn
@@ -144,19 +155,29 @@ parser.add_argument(
          "be achieved within --stop-timesteps AND --stop-iters.",
 )
 parser.add_argument(
-    "--stop-iters", type=int, default=Constants.MAX_ITERS, help="Number of iterations to train."
+    "--stop-iters", type=int, default=Constants.STOP_ITERS, help="Number of iterations to train."
 )
 parser.add_argument(
-    "--stop-timesteps", type=int, default=Constants.MAX_TIMESTEPS, help="Number of timesteps to train."
+    "--stop-timesteps", type=int, default=Constants.STOP_TIMESTEPS, help="Number of timesteps to train."
 )
 parser.add_argument(
-    "--stop-reward", type=float, default=160, help="Reward at which the training should be stopped."
+    "--stop-reward", type=float, default=Constants.STOP_REWARD, help="Reward at which the training should be stopped."
 )
 parser.add_argument(
     "--with-tune",
     action="store_true",
     help="Run without Tune using a manual train loop instead. In this case,"
          "use PPO without grid search and no TensorBoard.",
+)
+parser.add_argument(
+    "--gravity-change-mode",
+    action="store_true",
+    help="Run the environment in gravity change mode. The gravity will change every " + str(Constants.ITERS_PER_PHASE) + " iterations."
+)
+parser.add_argument(
+    "--prioritized-replay",
+    action="store_true",
+    help="Run with a prioritized replay buffer."
 )
 parser.add_argument(
     "--local-mode",
@@ -177,6 +198,7 @@ class FollowLines(gym.Env):
         It consists of a 2D plane where the agent, represented by a robot, has to follow a line.
         The environment is built using the PyBullet physics engine and the Gym library.
     """
+
     def __init__(self, env_config: EnvContext):
         """
             Initializes the environment.
@@ -194,7 +216,9 @@ class FollowLines(gym.Env):
         p.setGravity(0, 0, -10)
 
         # Load the plane on that the robot will move
-        plane_id = p.loadURDF("plane.urdf", globalScaling=0.5, basePosition=[2, 0, 0])
+        self.plane_id = p.loadURDF("plane.urdf", globalScaling=0.5, basePosition=[2, 0, 0])
+        white_texture_id = p.loadTexture("textures/white.bmp")
+        p.changeVisualShape(self.plane_id, -1, textureUniqueId=white_texture_id)
 
         # Set the starting position and orientation for the robot
         start_pos = [0, -5.3, 0.3]
@@ -216,6 +240,9 @@ class FollowLines(gym.Env):
         # List that will store the data
         self.data = []
 
+        # List that will store the rewards per episode
+        self.episode_reward = []
+
         # Variable that will count the number of time steps that have passed since the start of the episode
         self.passed_time_steps = 0
 
@@ -235,13 +262,9 @@ class FollowLines(gym.Env):
         for jointIndex in range(0, self.num_joints):
             print(p.getJointInfo(self.robo_id, jointIndex))
 
-        # Create two curved lines in the environment
-        make_curved_line(1.75, np.array([3.03, -4, 0]), np.deg2rad(270), CirclePortion.HALF)
-        make_curved_line(1.75, np.array([3.03, 1, 0]), np.deg2rad(90), CirclePortion.HALF)
-
         # Create the visual and collision shapes for the straight line in the environment
-        line_id_coll = p.createCollisionShape(p.GEOM_BOX, halfExtents=[8, 0.02, 0])
-        line_id = p.createVisualShape(p.GEOM_BOX, halfExtents=[8, 0.02, 0.01], rgbaColor=[0, 0, 0, 1])
+        line_id_coll = p.createCollisionShape(p.GEOM_BOX, halfExtents=[6, 0.02, 0])
+        line_id = p.createVisualShape(p.GEOM_BOX, halfExtents=[6, 0.02, 0.01], rgbaColor=[0, 0, 0, 1])
 
         line_ids = []
 
@@ -250,7 +273,60 @@ class FollowLines(gym.Env):
                                           baseInertialFramePosition=[0, 0, 0],
                                           baseCollisionShapeIndex=line_id_coll,
                                           baseVisualShapeIndex=line_id,
-                                          basePosition=[0, 2.5, 0.001],
+                                          basePosition=[0, 1, 0.001],
+                                          baseOrientation=start_orientation_walls_vert,
+                                          useMaximalCoordinates=True))
+
+        short_line_id_coll = p.createCollisionShape(p.GEOM_BOX, halfExtents=[1, 0.02, 0])
+        short_line_id = p.createVisualShape(p.GEOM_BOX, halfExtents=[1, 0.02, 0.01], rgbaColor=[0, 0, 0, 1])
+
+        # Create two curved lines in the environment
+        make_curved_line(1.5, np.array([3.0, -4, 0]), np.deg2rad(270), CirclePortion.HALF)
+        """
+        line_ids.append(p.createMultiBody(baseMass=0,
+                                          baseInertialFramePosition=[0, 0, 0],
+                                          baseCollisionShapeIndex=short_line_id_coll,
+                                          baseVisualShapeIndex=short_line_id,
+                                          basePosition=[1.8, -4.5, 0.005],
+                                          baseOrientation=start_orientation_walls_vert,
+                                          useMaximalCoordinates=True))
+
+        line_ids.append(p.createMultiBody(baseMass=0,
+                                          baseInertialFramePosition=[0, 0, 0],
+                                          baseCollisionShapeIndex=short_line_id_coll,
+                                          baseVisualShapeIndex=short_line_id,
+                                          basePosition=[4.26, -4.5, 0.005],
+                                          baseOrientation=start_orientation_walls_vert,
+                                          useMaximalCoordinates=True))
+        """
+        make_curved_line(1.5, np.array([3.0, 2, 0]), np.deg2rad(270), CirclePortion.HALF)
+        """
+        line_ids.append(p.createMultiBody(baseMass=0,
+                                          baseInertialFramePosition=[0, 0, 0],
+                                          baseCollisionShapeIndex=short_line_id_coll,
+                                          baseVisualShapeIndex=short_line_id,
+                                          basePosition=[1.8, 1.5, 0.005],
+                                          baseOrientation=start_orientation_walls_vert,
+                                          useMaximalCoordinates=True))
+        """
+        line_ids.append(p.createMultiBody(baseMass=0,
+                                          baseInertialFramePosition=[0, 0, 0],
+                                          baseCollisionShapeIndex=short_line_id_coll,
+                                          baseVisualShapeIndex=short_line_id,
+                                          basePosition=[4.37, 1.5, 0.005],
+                                          baseOrientation=start_orientation_walls_vert,
+                                          useMaximalCoordinates=True))
+
+        make_curved_line(1.5, np.array([5.75, 1, 0]), np.deg2rad(90), CirclePortion.HALF)
+
+        end_line_id_coll = p.createCollisionShape(p.GEOM_BOX, halfExtents=[3, 0.02, 0])
+        end_line_id = p.createVisualShape(p.GEOM_BOX, halfExtents=[3, 0.02, 0.01], rgbaColor=[0, 0, 0, 1])
+
+        line_ids.append(p.createMultiBody(baseMass=0,
+                                          baseInertialFramePosition=[0, 0, 0],
+                                          baseCollisionShapeIndex=end_line_id_coll,
+                                          baseVisualShapeIndex=end_line_id,
+                                          basePosition=[7.24, 4, 0.005],
                                           baseOrientation=start_orientation_walls_vert,
                                           useMaximalCoordinates=True))
 
@@ -283,8 +359,8 @@ class FollowLines(gym.Env):
         # Get the position and orientation of the robot
         self.robo_pos, self.robo_orn = p.getBasePositionAndOrientation(self.robo_id)
 
-        # Set up the action and observation spaces
-        self.action_space = Discrete(3)
+        # Set up the action space
+        self.action_space = Discrete(6)
 
         spaces = {}
 
@@ -345,13 +421,42 @@ class FollowLines(gym.Env):
             f.write(str(self.positions))
             f.write('\n')
 
+        with open('rewards.txt', 'a') as f:
+            f.write(str(self.episode_reward))
+            f.write('\n')
+        self.episode_reward = 0
         self.positions = []
         self.force_left_wheels = 0
         self.force_right_wheels = 0
 
-        # Place the robot at a different starting position after 10 iterations
-        if GlobalVars.passed_iterations > 9:
-            p.resetBasePositionAndOrientation(self.robo_id, [1.25, -4.2, 0.3], [0, 0, 0, 1])
+        if args.gravity_change_mode:
+            # Change the gravity every Constants.ITERS_PER_PHASE iterations
+            white_texture_id = p.loadTexture("textures/white.bmp")
+            green_texture_id = p.loadTexture("textures/green.bmp")
+            red_texture_id = p.loadTexture("textures/red.bmp")
+            #p.resetBasePositionAndOrientation(self.robo_id, [1.5, 1.5, 0.3], [0, 0, 0, 1])
+            if Constants.ITERS_PER_PHASE <= GlobalVars.passed_iterations <= Constants.ITERS_PER_PHASE * 2:
+                p.changeVisualShape(self.plane_id, -1, textureUniqueId=green_texture_id)
+                p.setGravity(-3.5, 0, -10)
+
+            if GlobalVars.passed_iterations > Constants.ITERS_PER_PHASE * 2:
+                p.changeVisualShape(self.plane_id, -1, textureUniqueId=red_texture_id)
+                p.setGravity(3.5, 0, -10)
+
+            if GlobalVars.passed_iterations > Constants.ITERS_PER_PHASE * 3:
+                p.changeVisualShape(self.plane_id, -1, textureUniqueId=white_texture_id)
+                p.setGravity(-3.5, 0, -10)
+        else:
+            # Place the robot at a different starting position after Const.ITERS_PER_PHASE iterations
+            if Constants.ITERS_PER_PHASE <= GlobalVars.passed_iterations <= Constants.ITERS_PER_PHASE * 2:
+                p.resetBasePositionAndOrientation(self.robo_id, [1.5, -4.5, 0.3], [0, 0, 0, 1])
+
+            if GlobalVars.passed_iterations > Constants.ITERS_PER_PHASE * 2:
+                p.resetBasePositionAndOrientation(self.robo_id, [4.51, -4.5, 0.3], [0, 0, 0, 1])
+
+            if GlobalVars.passed_iterations > Constants.ITERS_PER_PHASE * 3:
+                p.resetBasePositionAndOrientation(self.robo_id, [1.5, 1.5, 0.3], [0, 0, 0, 1])
+
         self.robo_pos, self.robo_orn = p.getBasePositionAndOrientation(self.robo_id)
 
         # Get the initial frame from the camera
@@ -367,19 +472,31 @@ class FollowLines(gym.Env):
         done = truncated = False
 
         # Set the force applied to the wheels based on the action
-        assert action in [0, 1, 2], action
+        assert action in [0, 1, 2, 3, 4, 5], action
         if action == 0:
             # forward with force 40
-            self.force_right_wheels = -40
-            self.force_left_wheels = -40
+            self.force_right_wheels = -Constants.FORCE_WHEELS
+            self.force_left_wheels = -Constants.FORCE_WHEELS
         elif action == 1:
             # turn right
-            self.force_right_wheels = 0
-            self.force_left_wheels = -40
+            self.force_right_wheels = -Constants.FORCE_WHEELS_TURN
+            self.force_left_wheels = -Constants.FORCE_WHEELS
         elif action == 2:
             # turn left
-            self.force_right_wheels = -40
-            self.force_left_wheels = 0
+            self.force_right_wheels = -Constants.FORCE_WHEELS
+            self.force_left_wheels = -Constants.FORCE_WHEELS_TURN
+        elif action == 3:
+            # fast forward
+            self.force_right_wheels = -Constants.FORCE_WHEELS * 1.5
+            self.force_left_wheels = -Constants.FORCE_WHEELS * 1.5
+        elif action == 4:
+            # fast turn right
+            self.force_right_wheels = -Constants.FORCE_WHEELS_TURN * 1.25
+            self.force_left_wheels = -Constants.FORCE_WHEELS * 1.5
+        elif action == 5:
+            # fast turn left
+            self.force_right_wheels = -Constants.FORCE_WHEELS * 1.5
+            self.force_left_wheels = -Constants.FORCE_WHEELS_TURN * 1.25
 
         # Apply the forces to the wheels
         p.setJointMotorControlArray(bodyIndex=self.robo_id,
@@ -387,9 +504,9 @@ class FollowLines(gym.Env):
                                     controlMode=p.VELOCITY_CONTROL,
                                     targetVelocities=[self.force_right_wheels, self.force_right_wheels,
                                                       self.force_left_wheels, self.force_left_wheels],
-                                    forces=[Constants.MAX_FORCE_WHEELS, Constants.MAX_FORCE_WHEELS,
-                                            Constants.MAX_FORCE_WHEELS,
-                                            Constants.MAX_FORCE_WHEELS])
+                                    forces=[Constants.FORCE_WHEELS, Constants.FORCE_WHEELS,
+                                            Constants.FORCE_WHEELS,
+                                            Constants.FORCE_WHEELS])
 
         # Run the simulation for 24 steps with the chosen action
         for i in range(24):
@@ -422,7 +539,7 @@ class FollowLines(gym.Env):
                     black_line_visible = True
                     # Old reward calculation that uses a linear function
                     '''
-                    if j < len(self.rgba[i]):
+                    if j < len(self.rgba[i] / 2):
                         reward += np.abs((j / (len(self.rgba[i]) / 2)) / 1000)
                     else:
                         reward += np.abs((2 - j / (len(self.rgba[i]) / 2)) / 1000)
@@ -450,6 +567,7 @@ class FollowLines(gym.Env):
             truncated = True
 
         self.passed_time_steps += 1
+        self.episode_reward += reward
 
         obs = self.get_observation_vector()
         # print(reward)
@@ -490,38 +608,38 @@ def create_checkpoint():
     return path_to_checkpoint
 
 
-if __name__ == '__main__':
-
-    args = parser.parse_args()
-    print(f"Running with following CLI options: {args}")
-
-    ray.init(local_mode=args.local_mode)
-
-    # Can also register the env creator function explicitly with:
-    # register_env("corridor", lambda config: SimpleCorridor(config))
-
-    replay_config = {
-        "type": "MultiAgentPrioritizedReplayBuffer",
-        "storage_unit": "timesteps",
-        "capacity": 30000,
-        "prioritized_replay_alpha": 1,
-        # Beta parameter for sampling from prioritized replay buffer.
-        "prioritized_replay_beta": 0.4,
-        # Epsilon to add to the TD errors when updating priorities.
-        "prioritized_replay_eps": 1e-6,
-        # The number of continuous environment steps to replay at once. This may
-        # be set to greater than 1 to support recurrent models.
-        "replay_sequence_length": 1,
-    }
+def create_dqn_config(gamma=0.0, lr_schedule=[[0, 1e-4], [Constants.TIMESTEPS_PER_PHASE, 1e-6]], initial_epsilon=1.0, final_epsilon=0.02,
+                      epsilon_timesteps=Constants.TIMESTEPS_PER_PHASE * 3):
+    if args.prioritized_replay:
+        replay_config = {
+            "type": "MultiAgentPrioritizedReplayBuffer",
+            "storage_unit": "timesteps",
+            "capacity": 3000,
+            "prioritized_replay_alpha": 1,
+            # Beta parameter for sampling from prioritized replay buffer.
+            "prioritized_replay_beta": 0.4,
+            # Epsilon to add to the TD errors when updating priorities.
+            "prioritized_replay_eps": 1e-6,
+            # The number of continuous environment steps to replay at once. This may
+            # be set to greater than 1 to support recurrent models.
+            "replay_sequence_length": 1,
+        }
+    else:
+        replay_config = {
+            "type": "MultiAgentReplayBuffer",
+            "storage_unit": "timesteps",
+            "capacity": 3000,
+            "replay_sequence_length": 1,
+        }
 
     exploration_config = {
         # Exploration sub-class by name or full path to module+class
         # (e.g. “ray.rllib.utils.exploration.epsilon_greedy.EpsilonGreedy”)
         "type": "EpsilonGreedy",
         # Parameters for the Exploration class' constructor:
-        "initial_epsilon": 1.0,
-        "final_epsilon": 0.02,
-        "epsilon_timesteps": 10000,  # Timesteps over which to anneal epsilon.
+        "initial_epsilon": initial_epsilon,
+        "final_epsilon": final_epsilon,
+        "epsilon_timesteps": epsilon_timesteps,  # Timesteps over which to anneal epsilon.
     }
 
     config = (
@@ -531,13 +649,28 @@ if __name__ == '__main__':
         .rollouts(num_rollout_workers=0, create_env_on_local_worker=True)
         # Use GPUs iff `RLLIB_NUM_GPUS` env var set to > 0.
         .resources(num_gpus=int(os.environ.get("RLLIB_NUM_GPUS", "0")))
-        .training(double_q=False, v_min=-30, lr_schedule=[[0, 1e-4], [10000, 1e-6]], v_max=100, noisy=False,
+        .training(double_q=False, v_min=-30, lr_schedule=lr_schedule, v_max=100, noisy=False,
                   replay_buffer_config=replay_config)
         .exploration(explore=True, exploration_config=exploration_config)
         # lr=7e-5,
         # lr_schedule=[[0, 1e-4], [20000, 1e-6]],
     )
-    config.gamma = 0.999
+    if gamma > 0:
+        config.gamma = gamma
+
+    return config
+
+
+if __name__ == '__main__':
+
+    args = parser.parse_args()
+    print(f"Running with following CLI options: {args}")
+
+    ray.init(local_mode=args.local_mode)
+
+    config = create_dqn_config(epsilon_timesteps=Constants.TIMESTEPS_PER_PHASE,
+                               lr_schedule=[[0, 1e-4], [Constants.TIMESTEPS_PER_PHASE, 1e-6]], initial_epsilon=1,
+                               final_epsilon=0.02)
 
     stop = {
         "training_iteration": args.stop_iters,
@@ -573,43 +706,59 @@ if __name__ == '__main__':
         # run manual training loop and print results after each iteration
         steps = 0
         for _ in range(args.stop_iters):
+            start_time = time.time()
             result = algo.train()
+            end_time = time.time()
+            elapsed_time = end_time - start_time
+
+            print("Time elapsed after executing 1000 learning steps: ", elapsed_time)
+            time_per_step = elapsed_time / 1000
+            print("Average time per step in seconds:", time_per_step)
+            print("Average frames per second:", 1 / time_per_step)
             print(result['training_iteration'])
             GlobalVars.passed_iterations = result['training_iteration']
             print('Counted iterations + 1')
             print("Current Exploration Epsilon:", algo.get_policy().get_exploration_state()['cur_epsilon'])
             print(pretty_print(result))
-            if GlobalVars.passed_iterations == 10:
+            if GlobalVars.passed_iterations == Constants.ITERS_PER_PHASE:
                 path = create_checkpoint()
 
                 algo.stop()
                 p.disconnect()
 
-                new_exploration_config = {
-                    # Exploration sub-class by name or full path to module+class
-                    # (e.g. “ray.rllib.utils.exploration.epsilon_greedy.EpsilonGreedy”)
-                    "type": "EpsilonGreedy",
-                    # Parameters for the Exploration class' constructor:
-                    "initial_epsilon": 0.5,
-                    "final_epsilon": 0.02,
-                    "epsilon_timesteps": 20000,  # Timesteps over which to anneal epsilon.
-                }
+                new_config = create_dqn_config(
+                    epsilon_timesteps=Constants.TIMESTEPS_PER_PHASE * 2,
+                    lr_schedule=[[Constants.TIMESTEPS_PER_PHASE, 1e-4], [Constants.TIMESTEPS_PER_PHASE * 2, 1e-6]],
+                    initial_epsilon=1, final_epsilon=0.02)
 
-                new_config = (
-                    DQNConfig(args.run)
-                    .environment(FollowLines, env_config={})
-                    .framework(args.framework)
-                    .rollouts(num_rollout_workers=0, create_env_on_local_worker=True)
-                    # Use GPUs iff `RLLIB_NUM_GPUS` env var set to > 0.
-                    .resources(num_gpus=int(os.environ.get("RLLIB_NUM_GPUS", "0")))
-                    .training(double_q=False, v_min=-30, lr_schedule=[[10000, 1e-4], [20000, 1e-6]], v_max=100,
-                              noisy=False,
-                              replay_buffer_config=replay_config)
-                    .exploration(explore=True, exploration_config=new_exploration_config)
-                    # lr=7e-5,
-                    # lr_schedule=[[0, 1e-4], [20000, 1e-6]],
-                )
-                # config.gamma = 0.999
+                algo = new_config.build()
+                algo.restore(path)
+
+            if GlobalVars.passed_iterations == Constants.ITERS_PER_PHASE * 2:
+                path = create_checkpoint()
+
+                algo.stop()
+                p.disconnect()
+
+                new_config = create_dqn_config(
+                    epsilon_timesteps=Constants.TIMESTEPS_PER_PHASE * 3,
+                    lr_schedule=[[Constants.TIMESTEPS_PER_PHASE * 2, 1e-4], [Constants.TIMESTEPS_PER_PHASE * 3, 1e-6]],
+                    initial_epsilon=1, final_epsilon=0.02)
+
+                algo = new_config.build()
+                algo.restore(path)
+
+            if GlobalVars.passed_iterations == Constants.ITERS_PER_PHASE * 3 + 1:
+                path = create_checkpoint()
+
+                algo.stop()
+                p.disconnect()
+
+                new_config = create_dqn_config(epsilon_timesteps=Constants.TIMESTEPS_PER_PHASE * 3,
+                                               lr_schedule=[[Constants.TIMESTEPS_PER_PHASE * 3, 0],
+                                                            [Constants.TIMESTEPS_PER_PHASE * 4, 0]],
+                                               initial_epsilon=1, final_epsilon=0.0)
+
                 algo = new_config.build()
                 algo.restore(path)
 
