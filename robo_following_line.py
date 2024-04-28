@@ -29,18 +29,6 @@ torch, nn = try_import_torch()
 # Global variables used in the environment
 class GlobalVars:
     passed_iterations = 0
-'''
-Einleitung für eine Masterarbeit zu dem Thema:
-- Reinforcement Learning
-- PyBullet
-- Roboter, der einer Linie folgt
-- Ray RLlib
-In dieser Arbeit geht es um die Entwicklung eines Reinforcement Learning Algorithmus, der einen Roboter in einer 2D-Umgebung steuert.
- Der Roboter soll einer Linie folgen, die in der Umgebung gezeichnet ist. Die Umgebung wird in PyBullet erstellt und der Algorithmus wird mit Ray RLlib entwickelt.
-Der Roboter wird mit einem tiefen neuronalen Netzwerk trainiert, das mit der Bibliothek PyTorch erstellt wird. Das neuronale Netzwerk wird mit dem Deep Q-Learning Algorithmus trainiert.
-Das Ziel der Arbeit ist es, einen Agenten kontinuierlich zu trainieren, sodass er einzelne Tasks lernen kann und sie anschließend zusammen ausführen kann, ohne alle Tasks gleichzeitig zu trainieren.
-
-'''
 
 # Contains all constants used in the environment
 class Constants:
