@@ -30,15 +30,16 @@ torch, nn = try_import_torch()
 class GlobalVars:
     passed_iterations = 0
 
+
 # Contains all constants used in the environment
 class Constants:
     STOP_TIMESTEPS = 150000
     ITERS_PER_PHASE = 10
     TIMESTEPS_PER_PHASE = ITERS_PER_PHASE * 1000
     NUMBER_OF_PHASES = 4
-    
+
     STOP_ITERS = 500
-    
+
     FORCE_WHEELS = 60
     FORCE_WHEELS_TURN = 30
 
@@ -160,7 +161,8 @@ parser.add_argument(
 parser.add_argument(
     "--gravity-change-mode",
     action="store_true",
-    help="Run the environment in gravity change mode. The gravity will change every " + str(Constants.ITERS_PER_PHASE) + " iterations."
+    help="Run the environment in gravity change mode. The gravity will change every " + str(
+        Constants.ITERS_PER_PHASE) + " iterations."
 )
 parser.add_argument(
     "--prioritized-replay",
@@ -209,10 +211,8 @@ class FollowLines(gym.Env):
         p.changeVisualShape(self.plane_id, -1, textureUniqueId=white_texture_id)
 
         # Set the starting position and orientation for the robot
-        start_pos = [0, -5.3, 0.3]
-        start_orientation_walls_vert = [np.sin(np.pi / 2), 1, 0, 0]
         start_orientation_robo = [0, 0, 0, 1]
-
+        start_pos = [0, -5.3, 0.3]
         # Load the robot model
         self.robo_id = p.loadURDF("r2d2_without_arm/r2d2_short.urdf", start_pos, start_orientation_robo)
 
@@ -250,73 +250,7 @@ class FollowLines(gym.Env):
         for jointIndex in range(0, self.num_joints):
             print(p.getJointInfo(self.robo_id, jointIndex))
 
-        # Create the visual and collision shapes for the straight line in the environment
-        line_id_coll = p.createCollisionShape(p.GEOM_BOX, halfExtents=[6, 0.02, 0])
-        line_id = p.createVisualShape(p.GEOM_BOX, halfExtents=[6, 0.02, 0.01], rgbaColor=[0, 0, 0, 1])
-
-        line_ids = []
-
-        # Create the straight line in the environment
-        line_ids.append(p.createMultiBody(baseMass=0,
-                                          baseInertialFramePosition=[0, 0, 0],
-                                          baseCollisionShapeIndex=line_id_coll,
-                                          baseVisualShapeIndex=line_id,
-                                          basePosition=[0, 1, 0.001],
-                                          baseOrientation=start_orientation_walls_vert,
-                                          useMaximalCoordinates=True))
-
-        short_line_id_coll = p.createCollisionShape(p.GEOM_BOX, halfExtents=[1, 0.02, 0])
-        short_line_id = p.createVisualShape(p.GEOM_BOX, halfExtents=[1, 0.02, 0.01], rgbaColor=[0, 0, 0, 1])
-
-        # Create two curved lines in the environment
-        make_curved_line(1.5, np.array([3.0, -4, 0]), np.deg2rad(270), CirclePortion.HALF)
-        """
-        line_ids.append(p.createMultiBody(baseMass=0,
-                                          baseInertialFramePosition=[0, 0, 0],
-                                          baseCollisionShapeIndex=short_line_id_coll,
-                                          baseVisualShapeIndex=short_line_id,
-                                          basePosition=[1.8, -4.5, 0.005],
-                                          baseOrientation=start_orientation_walls_vert,
-                                          useMaximalCoordinates=True))
-
-        line_ids.append(p.createMultiBody(baseMass=0,
-                                          baseInertialFramePosition=[0, 0, 0],
-                                          baseCollisionShapeIndex=short_line_id_coll,
-                                          baseVisualShapeIndex=short_line_id,
-                                          basePosition=[4.26, -4.5, 0.005],
-                                          baseOrientation=start_orientation_walls_vert,
-                                          useMaximalCoordinates=True))
-        """
-        make_curved_line(1.5, np.array([3.0, 2, 0]), np.deg2rad(270), CirclePortion.HALF)
-        """
-        line_ids.append(p.createMultiBody(baseMass=0,
-                                          baseInertialFramePosition=[0, 0, 0],
-                                          baseCollisionShapeIndex=short_line_id_coll,
-                                          baseVisualShapeIndex=short_line_id,
-                                          basePosition=[1.8, 1.5, 0.005],
-                                          baseOrientation=start_orientation_walls_vert,
-                                          useMaximalCoordinates=True))
-        """
-        line_ids.append(p.createMultiBody(baseMass=0,
-                                          baseInertialFramePosition=[0, 0, 0],
-                                          baseCollisionShapeIndex=short_line_id_coll,
-                                          baseVisualShapeIndex=short_line_id,
-                                          basePosition=[4.37, 1.5, 0.005],
-                                          baseOrientation=start_orientation_walls_vert,
-                                          useMaximalCoordinates=True))
-
-        make_curved_line(1.5, np.array([5.75, 1, 0]), np.deg2rad(90), CirclePortion.HALF)
-
-        end_line_id_coll = p.createCollisionShape(p.GEOM_BOX, halfExtents=[3, 0.02, 0])
-        end_line_id = p.createVisualShape(p.GEOM_BOX, halfExtents=[3, 0.02, 0.01], rgbaColor=[0, 0, 0, 1])
-
-        line_ids.append(p.createMultiBody(baseMass=0,
-                                          baseInertialFramePosition=[0, 0, 0],
-                                          baseCollisionShapeIndex=end_line_id_coll,
-                                          baseVisualShapeIndex=end_line_id,
-                                          basePosition=[7.24, 4, 0.005],
-                                          baseOrientation=start_orientation_walls_vert,
-                                          useMaximalCoordinates=True))
+        self.place_objects_in_pybullet_environment()
 
         # Get the state of the head link of the robot
         head_link_state = p.getLinkState(self.robo_id, 13, computeForwardKinematics=True)
@@ -370,6 +304,43 @@ class FollowLines(gym.Env):
 
         self.reset()
 
+    def place_objects_in_pybullet_environment(self):
+        start_orientation_walls_vert = [np.sin(np.pi / 2), 1, 0, 0]
+        # Create the visual and collision shapes for the straight line in the environment
+        line_id_coll = p.createCollisionShape(p.GEOM_BOX, halfExtents=[6, 0.02, 0])
+        line_id = p.createVisualShape(p.GEOM_BOX, halfExtents=[6, 0.02, 0.01], rgbaColor=[0, 0, 0, 1])
+        line_ids = []
+        # Create the straight line in the environment
+        line_ids.append(p.createMultiBody(baseMass=0,
+                                          baseInertialFramePosition=[0, 0, 0],
+                                          baseCollisionShapeIndex=line_id_coll,
+                                          baseVisualShapeIndex=line_id,
+                                          basePosition=[0, 1, 0.001],
+                                          baseOrientation=start_orientation_walls_vert,
+                                          useMaximalCoordinates=True))
+        short_line_id_coll = p.createCollisionShape(p.GEOM_BOX, halfExtents=[1, 0.02, 0])
+        short_line_id = p.createVisualShape(p.GEOM_BOX, halfExtents=[1, 0.02, 0.01], rgbaColor=[0, 0, 0, 1])
+        # Create two curved lines in the environment
+        make_curved_line(1.5, np.array([3.0, -4, 0]), np.deg2rad(270), CirclePortion.HALF)
+        make_curved_line(1.5, np.array([3.0, 2, 0]), np.deg2rad(270), CirclePortion.HALF)
+        line_ids.append(p.createMultiBody(baseMass=0,
+                                          baseInertialFramePosition=[0, 0, 0],
+                                          baseCollisionShapeIndex=short_line_id_coll,
+                                          baseVisualShapeIndex=short_line_id,
+                                          basePosition=[4.37, 1.5, 0.005],
+                                          baseOrientation=start_orientation_walls_vert,
+                                          useMaximalCoordinates=True))
+        make_curved_line(1.5, np.array([5.75, 1, 0]), np.deg2rad(90), CirclePortion.HALF)
+        end_line_id_coll = p.createCollisionShape(p.GEOM_BOX, halfExtents=[3, 0.02, 0])
+        end_line_id = p.createVisualShape(p.GEOM_BOX, halfExtents=[3, 0.02, 0.01], rgbaColor=[0, 0, 0, 1])
+        line_ids.append(p.createMultiBody(baseMass=0,
+                                          baseInertialFramePosition=[0, 0, 0],
+                                          baseCollisionShapeIndex=end_line_id_coll,
+                                          baseVisualShapeIndex=end_line_id,
+                                          basePosition=[7.24, 4, 0.005],
+                                          baseOrientation=start_orientation_walls_vert,
+                                          useMaximalCoordinates=True))
+
     def get_observation_vector(self):
         """
         This method generates an observation vector for the reinforcement learning agent.
@@ -422,7 +393,6 @@ class FollowLines(gym.Env):
             white_texture_id = p.loadTexture("textures/white.bmp")
             green_texture_id = p.loadTexture("textures/green.bmp")
             red_texture_id = p.loadTexture("textures/red.bmp")
-            #p.resetBasePositionAndOrientation(self.robo_id, [1.5, 1.5, 0.3], [0, 0, 0, 1])
             if Constants.ITERS_PER_PHASE <= GlobalVars.passed_iterations <= Constants.ITERS_PER_PHASE * 2:
                 p.changeVisualShape(self.plane_id, -1, textureUniqueId=green_texture_id)
                 p.setGravity(-3.5, 0, -10)
@@ -432,7 +402,7 @@ class FollowLines(gym.Env):
                 p.setGravity(3.5, 0, -10)
 
             if GlobalVars.passed_iterations > Constants.ITERS_PER_PHASE * 3:
-                p.changeVisualShape(self.plane_id, -1, textureUniqueId=white_texture_id)
+                p.changeVisualShape(self.plane_id, -1, textureUniqueId=green_texture_id)
                 p.setGravity(-3.5, 0, -10)
         else:
             # Place the robot at a different starting position after Const.ITERS_PER_PHASE iterations
@@ -461,37 +431,15 @@ class FollowLines(gym.Env):
 
         # Set the force applied to the wheels based on the action
         assert action in [0, 1, 2, 3, 4, 5], action
-        if action == 0:
-            # forward with force 40
-            self.force_right_wheels = -Constants.FORCE_WHEELS
-            self.force_left_wheels = -Constants.FORCE_WHEELS
-        elif action == 1:
-            # turn right
-            self.force_right_wheels = -Constants.FORCE_WHEELS_TURN
-            self.force_left_wheels = -Constants.FORCE_WHEELS
-        elif action == 2:
-            # turn left
-            self.force_right_wheels = -Constants.FORCE_WHEELS
-            self.force_left_wheels = -Constants.FORCE_WHEELS_TURN
-        elif action == 3:
-            # fast forward
-            self.force_right_wheels = -Constants.FORCE_WHEELS * 1.5
-            self.force_left_wheels = -Constants.FORCE_WHEELS * 1.5
-        elif action == 4:
-            # fast turn right
-            self.force_right_wheels = -Constants.FORCE_WHEELS_TURN * 1.25
-            self.force_left_wheels = -Constants.FORCE_WHEELS * 1.5
-        elif action == 5:
-            # fast turn left
-            self.force_right_wheels = -Constants.FORCE_WHEELS * 1.5
-            self.force_left_wheels = -Constants.FORCE_WHEELS_TURN * 1.25
+
+        force_left_wheels, force_right_wheels = self.get_action_for_robot(action)
 
         # Apply the forces to the wheels
         p.setJointMotorControlArray(bodyIndex=self.robo_id,
                                     jointIndices=[2, 3, 6, 7],
                                     controlMode=p.VELOCITY_CONTROL,
-                                    targetVelocities=[self.force_right_wheels, self.force_right_wheels,
-                                                      self.force_left_wheels, self.force_left_wheels],
+                                    targetVelocities=[force_right_wheels, force_right_wheels,
+                                                      force_left_wheels, force_left_wheels],
                                     forces=[Constants.FORCE_WHEELS, Constants.FORCE_WHEELS,
                                             Constants.FORCE_WHEELS,
                                             Constants.FORCE_WHEELS])
@@ -510,48 +458,23 @@ class FollowLines(gym.Env):
         camera_position, target_position = calculate_camera_position_and_orientation(head_link_orientation,
                                                                                      head_link_position)
 
-        self.robo_camera.set_camera_pose(camera_position, target_position)
-
-        self.rgba, self.depth, seg = self.robo_camera.get_frame()
-        # save the frame
-        # self.robo_camera.save_frame("frame.png", rgba=self.rgba)
-
-        black_line_visible = False
-        # Reward the agent for keeping the black line in the center of the screen
-        # Iterate over the height of the image
-        for i in range(len(self.rgba)):
-            # Iterate over the width of the image
-            for j in range(len(self.rgba[i])):
-                # Check if the pixel at (i, j) is black
-                if self.rgba[i][j][2] <= 0 and self.rgba[i][j][0] <= 0 >= self.rgba[i][j][1]:
-                    black_line_visible = True
-                    # Old reward calculation that uses a linear function
-                    '''
-                    if j < len(self.rgba[i] / 2):
-                        reward += np.abs((j / (len(self.rgba[i]) / 2)) / 1000)
-                    else:
-                        reward += np.abs((2 - j / (len(self.rgba[i]) / 2)) / 1000)
-                    '''
-                    # Calculate a reward based on the position of the black pixel in the image
-                    # The reward is calculated using a Gaussian function, that is centered in the middle of the image
-                    # The closer the black pixel is to the center of the image, the higher the reward
-                    # This encourages the agent to keep the black line in the center of the image
-                    reward += np.exp(
-                        -np.square(
-                            (((j + 1) - len(self.rgba[i]) / 2) / len(self.rgba[i])) / 0.05
-                        )
-                    ) / 200
-
-        # Agent lost the line
-        if not black_line_visible:
-            reward = -5
-            truncated = True
-
         # Reset the simulation when the agent makes the robot fall over
         if head_link_position[2] < 0.3:
             print("Robo fell over.")
             self.robo_fell_over = 1
-            reward = -1
+            reward = -5
+            truncated = True
+
+        self.robo_camera.set_camera_pose(camera_position, target_position)
+
+        rgba, depth, seg = self.robo_camera.get_frame()
+        # self.robo_camera.save_frame("frame.png", rgba=self.rgba)
+
+        black_line_visible, reward = self.get_observation_for_step(reward, rgba)
+
+        # Agent lost the line
+        if not black_line_visible:
+            reward = -5
             truncated = True
 
         self.passed_time_steps += 1
@@ -567,6 +490,63 @@ class FollowLines(gym.Env):
             truncated,
             {},
         )
+
+    def get_observation_for_step(self, reward, rgba):
+        black_line_visible = False
+        # Reward the agent for keeping the black line in the center of the screen
+        # Iterate over the height of the image
+        for i in range(len(rgba)):
+            # Iterate over the width of the image
+            for j in range(len(rgba[i])):
+                # Check if the pixel at (i, j) is black
+                if rgba[i][j][2] <= 0 and rgba[i][j][0] <= 0 >= rgba[i][j][1]:
+                    black_line_visible = True
+                    # Old reward calculation that uses a linear function
+                    '''
+                    if j < len(self.rgba[i] / 2):
+                        reward += np.abs((j / (len(self.rgba[i]) / 2)) / 1000)
+                    else:
+                        reward += np.abs((2 - j / (len(self.rgba[i]) / 2)) / 1000)
+                    '''
+                    # Calculate a reward based on the position of the black pixel in the image
+                    # The reward is calculated using a Gaussian function, that is centered in the middle of the image
+                    # The closer the black pixel is to the center of the image, the higher the reward
+                    # This encourages the agent to keep the black line in the center of the image
+                    reward += np.exp(
+                        -np.square(
+                            (((j + 1) - len(rgba[i]) / 2) / len(rgba[i])) / 0.05
+                        )
+                    ) / 200
+        return black_line_visible, reward
+
+    def get_action_for_robot(self, action):
+        force_right_wheels = 0
+        force_left_wheels = 0
+        if action == 0:
+            # forward with force 40
+            force_right_wheels = -Constants.FORCE_WHEELS
+            force_left_wheels = -Constants.FORCE_WHEELS
+        elif action == 1:
+            # turn right
+            force_right_wheels = -Constants.FORCE_WHEELS_TURN
+            force_left_wheels = -Constants.FORCE_WHEELS
+        elif action == 2:
+            # turn left
+            force_right_wheels = -Constants.FORCE_WHEELS
+            force_left_wheels = -Constants.FORCE_WHEELS_TURN
+        elif action == 3:
+            # fast forward
+            force_right_wheels = -Constants.FORCE_WHEELS * 1.5
+            force_left_wheels = -Constants.FORCE_WHEELS * 1.5
+        elif action == 4:
+            # fast turn right
+            force_right_wheels = -Constants.FORCE_WHEELS_TURN * 1.25
+            force_left_wheels = -Constants.FORCE_WHEELS * 1.5
+        elif action == 5:
+            # fast turn left
+            force_right_wheels = -Constants.FORCE_WHEELS * 1.5
+            force_left_wheels = -Constants.FORCE_WHEELS_TURN * 1.25
+        return force_left_wheels, force_right_wheels
 
 
 # Calculates the position and orientation for the front camera of the robot
@@ -596,8 +576,8 @@ def create_checkpoint():
     return path_to_checkpoint
 
 
-def create_dqn_config(gamma=0.0, lr_schedule=[[0, 1e-4], [Constants.TIMESTEPS_PER_PHASE, 1e-6]], initial_epsilon=1.0, final_epsilon=0.02,
-                      epsilon_timesteps=Constants.TIMESTEPS_PER_PHASE * 3):
+def create_dqn_config(gamma=0.0, lr_schedule=([0, 1e-4], [Constants.TIMESTEPS_PER_PHASE, 1e-6]), initial_epsilon=1.0,
+                      final_epsilon=0.02, epsilon_timesteps=Constants.TIMESTEPS_PER_PHASE * 3):
     if args.prioritized_replay:
         replay_config = {
             "type": "MultiAgentPrioritizedReplayBuffer",
@@ -635,13 +615,11 @@ def create_dqn_config(gamma=0.0, lr_schedule=[[0, 1e-4], [Constants.TIMESTEPS_PE
         .environment(FollowLines, env_config={})
         .framework(args.framework)
         .rollouts(num_rollout_workers=0, create_env_on_local_worker=True)
-        # Use GPUs iff `RLLIB_NUM_GPUS` env var set to > 0.
+        # Use GPUs if `RLLIB_NUM_GPUS` env var set to > 0.
         .resources(num_gpus=int(os.environ.get("RLLIB_NUM_GPUS", "0")))
         .training(double_q=False, v_min=-30, lr_schedule=lr_schedule, v_max=100, noisy=False,
                   replay_buffer_config=replay_config)
         .exploration(explore=True, exploration_config=exploration_config)
-        # lr=7e-5,
-        # lr_schedule=[[0, 1e-4], [20000, 1e-6]],
     )
     if gamma > 0:
         config.gamma = gamma
@@ -708,7 +686,7 @@ if __name__ == '__main__':
             print('Counted iterations + 1')
             print("Current Exploration Epsilon:", algo.get_policy().get_exploration_state()['cur_epsilon'])
             print(pretty_print(result))
-            if GlobalVars.passed_iterations == Constants.ITERS_PER_PHASE:
+            if GlobalVars.passed_iterations == Constants.ITERS_PER_PHASE + 1:
                 path = create_checkpoint()
 
                 algo.stop()
@@ -722,7 +700,7 @@ if __name__ == '__main__':
                 algo = new_config.build()
                 algo.restore(path)
 
-            if GlobalVars.passed_iterations == Constants.ITERS_PER_PHASE * 2:
+            if GlobalVars.passed_iterations == Constants.ITERS_PER_PHASE * 2 + 1:
                 path = create_checkpoint()
 
                 algo.stop()
@@ -761,112 +739,3 @@ if __name__ == '__main__':
         algo.stop()
 
     ray.shutdown()
-
-# Old way of creating a curved line. This is now done using the make_curved_line function.
-'''
-        small_line_id_coll = p.createCollisionShape(p.GEOM_BOX, halfExtents=[0.5, 0.02, 0])
-        small_line_id = p.createVisualShape(p.GEOM_BOX, halfExtents=[0.5, 0.02, 0.01], rgbaColor=[0, 0, 0, 1])
-
-        # Curve Lines
-        line_ids.append(p.createMultiBody(baseMass=0,
-                                          baseInertialFramePosition=[0, 0, 0],
-                                          baseCollisionShapeIndex=small_line_id_coll,
-                                          baseVisualShapeIndex=small_line_id,
-                                          basePosition=[4.71, -0.92, 0.001],
-                                          baseOrientation=[np.sin(np.pi / 2), 1, 0, 0],
-                                          useMaximalCoordinates=True))
-
-        line_ids.append(p.createMultiBody(baseMass=0,
-                                          baseInertialFramePosition=[0, 0, 0],
-                                          baseCollisionShapeIndex=small_line_id_coll,
-                                          baseVisualShapeIndex=small_line_id,
-                                          basePosition=[4.85, 0, 0.001],
-                                          baseOrientation=p.getQuaternionFromEuler([0, 0, np.pi/2.5]),
-                                          useMaximalCoordinates=True))
-
-        line_ids.append(p.createMultiBody(baseMass=0,
-                                          baseInertialFramePosition=[0, 0, 0],
-                                          baseCollisionShapeIndex=small_line_id_coll,
-                                          baseVisualShapeIndex=small_line_id,
-                                          basePosition=[5.26, 0.9, 0.001],
-                                          baseOrientation=p.getQuaternionFromEuler([0, 0, np.pi/3]),
-                                          useMaximalCoordinates=True))
-
-        line_ids.append(p.createMultiBody(baseMass=0,
-                                          baseInertialFramePosition=[0, 0, 0],
-                                          baseCollisionShapeIndex=small_line_id_coll,
-                                          baseVisualShapeIndex=small_line_id,
-                                          basePosition=[5.8, 1.6, 0.001],
-                                          baseOrientation=p.getQuaternionFromEuler([0, 0, np.pi/4]),
-                                          useMaximalCoordinates=True))
-
-        line_ids.append(p.createMultiBody(baseMass=0,
-                                          baseInertialFramePosition=[0, 0, 0],
-                                          baseCollisionShapeIndex=small_line_id_coll,
-                                          baseVisualShapeIndex=small_line_id,
-                                          basePosition=[6.6, 2.2, 0.001],
-                                          baseOrientation=p.getQuaternionFromEuler([0, 0, np.pi / 6]),
-                                          useMaximalCoordinates=True))
-
-        line_ids.append(p.createMultiBody(baseMass=0,
-                                          baseInertialFramePosition=[0, 0, 0],
-                                          baseCollisionShapeIndex=small_line_id_coll,
-                                          baseVisualShapeIndex=small_line_id,
-                                          basePosition=[7.5, 2.45, 0.001],
-                                          baseOrientation=p.getQuaternionFromEuler([0, 0, 0]),
-                                          useMaximalCoordinates=True))
-
-        line_ids.append(p.createMultiBody(baseMass=0,
-                                          baseInertialFramePosition=[0, 0, 0],
-                                          baseCollisionShapeIndex=small_line_id_coll,
-                                          baseVisualShapeIndex=small_line_id,
-                                          basePosition=[8.4, 2.25, 0.001],
-                                          baseOrientation=p.getQuaternionFromEuler([0, 0, np.pi + (np.pi / 1.15)]),
-                                          useMaximalCoordinates=True))
-
-        line_ids.append(p.createMultiBody(baseMass=0,
-                                          baseInertialFramePosition=[0, 0, 0],
-                                          baseCollisionShapeIndex=small_line_id_coll,
-                                          baseVisualShapeIndex=small_line_id,
-                                          basePosition=[9.2, 1.70, 0.001],
-                                          baseOrientation=p.getQuaternionFromEuler([0, 0, np.pi + (np.pi / 1.35)]),
-                                          useMaximalCoordinates=True))
-
-        line_ids.append(p.createMultiBody(baseMass=0,
-                                          baseInertialFramePosition=[0, 0, 0],
-                                          baseCollisionShapeIndex=small_line_id_coll,
-                                          baseVisualShapeIndex=small_line_id,
-                                          basePosition=[9.72, 0.90, 0.001],
-                                          baseOrientation=p.getQuaternionFromEuler([0, 0, np.pi + (np.pi / 1.6)]),
-                                          useMaximalCoordinates=True))
-
-        line_ids.append(p.createMultiBody(baseMass=0,
-                                          baseInertialFramePosition=[0, 0, 0],
-                                          baseCollisionShapeIndex=small_line_id_coll,
-                                          baseVisualShapeIndex=small_line_id,
-                                          basePosition=[9.98, 0.0, 0.001],
-                                          baseOrientation=p.getQuaternionFromEuler([0, 0, np.pi + (np.pi / 1.8)]),
-                                          useMaximalCoordinates=True))
-
-        line_ids.append(p.createMultiBody(baseMass=0,
-                                          baseInertialFramePosition=[0, 0, 0],
-                                          baseCollisionShapeIndex=small_line_id_coll,
-                                          baseVisualShapeIndex=small_line_id,
-                                          basePosition=[10.06, -0.98, 0.001],
-                                          baseOrientation=p.getQuaternionFromEuler([0, 0, np.pi + (np.pi / 2)]),
-                                          useMaximalCoordinates=True))
-
-        goal_box_id_coll = p.createCollisionShape(p.GEOM_BOX, halfExtents=[0.2, 0.2, 0.2])
-        goal_box_id = p.createVisualShape(p.GEOM_BOX, halfExtents=[0.2, 0.2, 0.2], rgbaColor=[0, 0, 1, 0])
-
-        self.goal_ball_body_id = p.createMultiBody(baseMass=0,
-                                                   baseInertialFramePosition=[0, 0, 0],
-                                                   baseCollisionShapeIndex=goal_box_id_coll,
-                                                   baseVisualShapeIndex=goal_box_id,
-                                                   basePosition=Constants.GOAL_POSITION,
-                                                   baseOrientation=start_orientation_walls_hori,
-                                                   useMaximalCoordinates=True)
-
-        self.collision_detector_goal = putils.CollisionDetector(self.client_id,
-                                                                [(self.robo_id, self.goal_ball_body_id)])
-        '''
